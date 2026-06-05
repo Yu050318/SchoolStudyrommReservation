@@ -1242,7 +1242,7 @@ svg {
 .slot-field__controls {
   display: grid;
   grid-template-columns: repeat(2, 114px);
-  gap: 8px;
+  gap: 14px;
   width: max-content;
 }
 
@@ -1488,8 +1488,8 @@ svg {
 
 .violation-row {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) 120px 72px 78px;
-  gap: 18px;
+  grid-template-columns: minmax(240px, 1fr) 120px 72px 78px 76px;
+  gap: 14px;
   align-items: center;
   min-height: 112px;
   border-top: 1px solid var(--line);
@@ -1516,6 +1516,21 @@ svg {
 .violation-row em {
   color: var(--primary);
   background: var(--green);
+}
+
+.appeal-action {
+  min-height: 34px;
+  padding: 0 14px;
+  color: var(--primary);
+  background: #f5fbfa;
+  border: 1px solid rgba(19, 124, 122, 0.24);
+  border-radius: 8px;
+  font-weight: 800;
+}
+
+.appeal-action:hover {
+  color: #fff;
+  background: var(--primary);
 }
 
 .admin-grid {

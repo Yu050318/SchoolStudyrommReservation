@@ -1347,6 +1347,7 @@ watch(currentPage, () => {
                 <span>{{ item.date }}</span>
                 <b>{{ getViolationScoreChange(item) }}分</b>
                 <em>{{ item.status }}</em>
+                <button class="appeal-action" type="button" @click="showToast('申诉申请已提交，等待管理员审核')">申诉</button>
               </div>
               <div v-if="filteredViolations.length === 0" class="empty-inline">
                 没有找到匹配的违规记录
