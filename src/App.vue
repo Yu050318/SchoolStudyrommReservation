@@ -39,9 +39,11 @@ const selectedEndTime = ref('21:00')
 const toastMessage = ref('')
 const profileMenuOpen = ref(false)
 const checkoutConfirmOpen = ref(false)
+const cancelConfirmOpen = ref(false)
 const timePickerOpen = ref('')
 const beijingNow = ref(new Date())
 const currentUser = ref(null)
+const currentBookingId = ref(null)
 const apiOnline = ref(false)
 const adminStats = ref({
   todayBookings: 328,
@@ -79,13 +81,20 @@ function saveLogin(role) {
 
 const loginForm = ref(readSavedLogin('student'))
 const registerForm = ref({
-  account: '20230218',
-  name: '林同学',
-  phone: '13800000000',
-  className: '软件工程 2301',
-  password: '123456',
-  confirmPassword: '123456',
+  account: '',
+  name: '',
+  phone: '',
+  college: '',
+  className: '',
+  password: '',
+  confirmPassword: '',
 })
+const collegeOptions = [
+  { name: '软件工程学院', classes: ['软件工程 2301', '软件工程 2302', '软件工程 2303'] },
+  { name: '计算机科学学院', classes: ['计算机科学 2301', '数据科学 2301', '人工智能 2301'] },
+  { name: '信息管理学院', classes: ['信息管理 2301', '电子商务 2301', '数字媒体 2301'] },
+  { name: '电子信息学院', classes: ['通信工程 2301', '电子信息 2301', '自动化 2301'] },
+]
 let toastTimer
 let clockTimer
 
@@ -241,7 +250,6 @@ const adminModules = [
 const filterOptions = [
   { key: 'all', label: '全部' },
   { key: 'free', label: '空闲较多' },
-  { key: 'openLate', label: '近期开门' },
   { key: 'power', label: '有插座' },
 ]
 
@@ -257,7 +265,7 @@ const studentProfile = {
   id: '20230218',
   college: '软件工程学院',
   className: '软件工程 2301',
-  phone: '138****0000',
+  phone: 'lin@example.com',
 }
 
 const adminProfile = {
@@ -287,6 +295,10 @@ const currentProfile = computed(() => {
     phone: currentUser.value.phone,
   }
 })
+const profileInitial = computed(() => currentProfile.value.name?.trim()?.charAt(0) || (isAdmin.value ? '管' : '学'))
+const currentClassOptions = computed(
+  () => collegeOptions.find((college) => college.name === registerForm.value.college)?.classes || [],
+)
 const meta = computed(() => pageMeta[currentPage.value])
 const showSearchBox = computed(() => !isAdmin.value && currentPage.value === 'rooms')
 const roomStats = computed(() =>
@@ -310,7 +322,10 @@ const seatStats = computed(() =>
   ),
 )
 const activeBooking = computed(() => {
-  const row = historyRows.value.find((item) => item.status === '待签到' || item.status === '已签到')
+  if (!currentBookingId.value) return null
+  const row = historyRows.value.find(
+    (item) => item.id === currentBookingId.value && (item.status === '待签到' || item.status === '已签到'),
+  )
   if (!row) return null
 
   return {
@@ -362,7 +377,6 @@ const filteredRooms = computed(() => {
     const matchesFilter =
       currentFilter.value === 'all' ||
       (currentFilter.value === 'free' && room.seats.free >= 20) ||
-      (currentFilter.value === 'openLate' && room.hours.endsWith('23:00')) ||
       (currentFilter.value === 'power' && room.facilities.includes('插座'))
     return matchesKeyword && matchesFilter
   })
@@ -391,6 +405,7 @@ const endTimeOptions = computed(() => {
   if (!selectedStartTime.value) return []
   return timeOptions.filter((time) => time > selectedStartTime.value)
 })
+const noTimeSlotText = computed(() => (isSelectedToday.value ? '今日已无可选' : '暂无预约时段'))
 const selectedTimeSlot = computed(() => `${selectedStartTime.value}-${selectedEndTime.value}`)
 const selectedSlotLabel = computed(() => `${selectedDate.value} ${selectedTimeSlot.value}`)
 
@@ -605,6 +620,18 @@ function toggleAuthMode() {
 }
 
 async function registerAccount() {
+  if (
+    !registerForm.value.account ||
+    !registerForm.value.name ||
+    !registerForm.value.phone ||
+    !registerForm.value.college ||
+    !registerForm.value.className ||
+    !registerForm.value.password ||
+    !registerForm.value.confirmPassword
+  ) {
+    showToast('请完整填写注册信息')
+    return
+  }
   if (registerForm.value.password !== registerForm.value.confirmPassword) {
     showToast('两次密码不一致')
     return
@@ -616,13 +643,20 @@ async function registerAccount() {
       body: {
         account: registerForm.value.account,
         name: registerForm.value.name,
+        email: registerForm.value.phone,
         phone: registerForm.value.phone,
+        college: registerForm.value.college,
         className: registerForm.value.className,
         password: registerForm.value.password,
       },
     })
     currentUser.value = payload.user
     apiOnline.value = true
+    loginForm.value = {
+      account: registerForm.value.account,
+      password: registerForm.value.password,
+    }
+    saveLogin('student')
   } catch (error) {
     apiOnline.value = false
     showToast(`注册失败：${error.message}`)
@@ -638,6 +672,7 @@ async function enterApp(page = 'home', role = 'student') {
   currentPage.value = page
   authMode.value = 'app'
   profileMenuOpen.value = false
+  currentBookingId.value = null
   await loadAppData(role)
   showToast(role === 'admin' ? '管理员登录成功' : mode === 'register' ? '注册成功，已进入系统' : '登录成功，欢迎回来')
 }
@@ -649,6 +684,7 @@ function logout() {
   loginRole.value = 'student'
   authMode.value = 'login'
   currentPage.value = 'home'
+  currentBookingId.value = null
 }
 
 function switchAccount() {
@@ -658,6 +694,7 @@ function switchAccount() {
   loginRole.value = 'student'
   authMode.value = 'login'
   currentPage.value = 'home'
+  currentBookingId.value = null
   showToast('已切换到登录界面')
 }
 
@@ -700,35 +737,54 @@ async function reserveSeat() {
     showToast('当前日期已无可预约时段')
     return
   }
+  const bookingContext = {
+    date: selectedDate.value,
+    roomId: selectedRoom.value.id,
+    roomName: selectedRoom.value.name,
+    seatNo: selectedSeat.value.id,
+    time: selectedTimeSlot.value,
+  }
   const range = toDateTimeRange(selectedDate.value, selectedStartTime.value, selectedEndTime.value)
   try {
     const payload = await apiRequest('/bookings', {
       method: 'POST',
       body: {
         userId: currentUser.value?.id,
-        roomId: selectedRoom.value.id,
-        seatNo: selectedSeat.value.id,
+        roomId: bookingContext.roomId,
+        seatNo: bookingContext.seatNo,
         startTime: range.startTime,
         endTime: range.endTime,
       },
     })
-    await Promise.all([loadBookings(), loadRooms(), loadSeats(selectedRoom.value.id)])
-    bookingStatus.value = normalizeStatus(payload.status)
+    await Promise.all([loadBookings(), loadRooms(), loadSeats(bookingContext.roomId)])
+    const reservedRow = historyRows.value.find(
+      (row) =>
+        (payload.id && row.id === payload.id) ||
+        (payload.booking?.id && row.id === payload.booking.id) ||
+        (row.date === bookingContext.date &&
+        row.room === bookingContext.roomName &&
+        row.seat === bookingContext.seatNo &&
+        row.time === bookingContext.time &&
+        row.status === '待签到')
+    )
+    currentBookingId.value = reservedRow?.id || null
+    bookingStatus.value = reservedRow?.status || normalizeStatus(payload.status)
     apiOnline.value = true
   } catch (error) {
     apiOnline.value = false
-    historyRows.value[0] = {
-      ...historyRows.value[0],
-      id: historyRows.value[0]?.id,
-      date: selectedDate.value,
-      room: selectedRoom.value.name,
-      seat: selectedSeat.value.id,
-      time: selectedTimeSlot.value,
+    const localBookingId = `local-${Date.now()}`
+    historyRows.value = [{
+      id: localBookingId,
+      date: bookingContext.date,
+      room: bookingContext.roomName,
+      seat: bookingContext.seatNo,
+      time: bookingContext.time,
       status: '待签到',
-    }
+    }, ...historyRows.value]
+    currentBookingId.value = localBookingId
   }
   currentPage.value = 'booking'
-  showToast(`已预约 ${selectedRoom.value.name} ${selectedSeat.value.id}`)
+  showToast(`已预约 ${bookingContext.roomName} ${bookingContext.seatNo}`)
 }
 
 async function updateBookingStatus(status) {
@@ -789,6 +845,7 @@ async function confirmCheckOut() {
   checkoutConfirmOpen.value = false
   await updateBookingStatus('已签退')
   bookingStatus.value = '暂无预约'
+  currentBookingId.value = null
   showToast('签退成功，当前暂无预约')
 }
 
@@ -801,8 +858,15 @@ async function handleCancelBooking() {
     showToast('已签到的预约不能取消，请签退')
     return
   }
+  cancelConfirmOpen.value = true
+}
+
+async function confirmCancelBooking() {
+  cancelConfirmOpen.value = false
   await updateBookingStatus('已取消')
   bookingStatus.value = '暂无预约'
+  currentBookingId.value = null
+  showToast('预约已取消，当前暂无预约')
 }
 
 onMounted(async () => {
@@ -828,6 +892,10 @@ onUnmounted(() => {
 watch(selectedDate, () => {
   ensureValidSelectedDate()
   ensureValidTimeRange()
+})
+
+watch(() => registerForm.value.college, () => {
+  registerForm.value.className = ''
 })
 
 watch(currentPage, () => {
@@ -859,7 +927,7 @@ watch(currentPage, () => {
                 ? '填写注册信息后即可预约座位'
                 : loginRole === 'admin'
                   ? '请输入管理员账号和密码进入后台'
-                  : '请输入学号和密码进入系统'
+                  : '请输入账号和密码进入系统'
             }}
           </p>
         </div>
@@ -867,26 +935,40 @@ watch(currentPage, () => {
 
       <form class="form-grid" @submit.prevent="authMode === 'login' ? loginAs(loginRole) : registerAccount()">
         <label>
-          <span>{{ loginRole === 'admin' && authMode === 'login' ? '管理员账号' : '学号' }}</span>
+          <span>{{ loginRole === 'admin' && authMode === 'login' ? '管理员账号' : authMode === 'login' ? '账号' : '学号' }}</span>
           <input
             v-model="loginForm.account"
             v-if="authMode === 'login'"
             autocomplete="off"
-            :placeholder="loginRole === 'admin' ? '请输入管理员账号' : '请输入学号'"
+            :placeholder="loginRole === 'admin' ? '请输入管理员账号' : '请输入账号'"
           />
-          <input v-model="registerForm.account" v-else />
+          <input v-model="registerForm.account" v-else placeholder="请输入学号" />
         </label>
         <label v-if="authMode === 'register'">
           <span>姓名</span>
-          <input v-model="registerForm.name" />
+          <input v-model="registerForm.name" placeholder="请输入姓名" />
         </label>
         <label v-if="authMode === 'register'">
-          <span>手机号</span>
-          <input v-model="registerForm.phone" />
+          <span>邮箱</span>
+          <input v-model="registerForm.phone" type="email" placeholder="请输入邮箱" />
         </label>
         <label v-if="authMode === 'register'">
-          <span>学院 / 班级</span>
-          <input v-model="registerForm.className" />
+          <span>学院</span>
+          <select v-model="registerForm.college">
+            <option value="" disabled>请选择学院</option>
+            <option v-for="college in collegeOptions" :key="college.name" :value="college.name">
+              {{ college.name }}
+            </option>
+          </select>
+        </label>
+        <label v-if="authMode === 'register'">
+          <span>班级</span>
+          <select v-model="registerForm.className" :disabled="!registerForm.college">
+            <option value="" disabled>请选择班级</option>
+            <option v-for="className in currentClassOptions" :key="className" :value="className">
+              {{ className }}
+            </option>
+          </select>
         </label>
         <label>
           <span>密码</span>
@@ -897,11 +979,11 @@ watch(currentPage, () => {
             autocomplete="new-password"
             placeholder="请输入密码"
           />
-          <input v-model="registerForm.password" v-else type="password" />
+          <input v-model="registerForm.password" v-else type="password" placeholder="请输入密码" />
         </label>
         <label v-if="authMode === 'register'">
           <span>确认密码</span>
-          <input v-model="registerForm.confirmPassword" type="password" />
+          <input v-model="registerForm.confirmPassword" type="password" placeholder="请再次输入密码" />
         </label>
         <button class="primary-action" type="submit">
           {{ authMode === 'login' ? '登录' : '注册账号' }}
@@ -975,13 +1057,13 @@ watch(currentPage, () => {
             aria-haspopup="menu"
             @click="profileMenuOpen = !profileMenuOpen"
           >
-            <span>{{ isAdmin ? '管' : '林' }}</span>
+            <span>{{ profileInitial }}</span>
             <b>{{ isAdmin ? `管理员 ${currentProfile.id}` : `学生 ${currentProfile.id}` }}</b>
           </button>
           <transition name="menu-pop">
             <section v-if="profileMenuOpen" class="profile-menu" role="menu">
               <div class="profile-menu__head">
-                <span>{{ isAdmin ? '管' : '林' }}</span>
+                <span>{{ profileInitial }}</span>
                 <div>
                   <strong>{{ currentProfile.name }}</strong>
                   <small>{{ isAdmin ? '工号' : '学号' }} {{ currentProfile.id }}</small>
@@ -997,7 +1079,7 @@ watch(currentPage, () => {
                   <dd>{{ currentProfile.className }}</dd>
                 </div>
                 <div>
-                  <dt>手机号</dt>
+                  <dt>邮箱</dt>
                   <dd>{{ currentProfile.phone }}</dd>
                 </div>
               </dl>
@@ -1036,6 +1118,24 @@ watch(currentPage, () => {
             <div class="confirm-actions">
               <button class="secondary-action compact" type="button" @click="checkoutConfirmOpen = false">暂不签退</button>
               <button class="primary-action compact" type="button" @click="confirmCheckOut">确认签退</button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
+        <div v-if="cancelConfirmOpen" class="confirm-mask" @click.self="cancelConfirmOpen = false">
+          <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="cancel-title">
+            <div class="confirm-icon">
+              <XCircle />
+            </div>
+            <h2 id="cancel-title">确认取消预约？</h2>
+            <p>
+              取消后当前预约将结束，并从当前预约区域隐藏。该记录仍会保留在预约记录中。
+            </p>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="cancelConfirmOpen = false">暂不取消</button>
+              <button class="danger-action compact" type="button" @click="confirmCancelBooking">确认取消</button>
             </div>
           </section>
         </div>
@@ -1086,7 +1186,7 @@ watch(currentPage, () => {
               <span>开始时间</span>
               <div class="time-picker" @click.stop>
                 <button class="time-picker__button" type="button" @click="toggleTimePicker('rooms-start')">
-                  {{ selectedStartTime || '今日已无可选' }}
+                  {{ selectedStartTime || noTimeSlotText }}
                   <ChevronRight />
                 </button>
                 <div v-if="timePickerOpen === 'rooms-start'" class="time-picker__menu">
@@ -1099,7 +1199,7 @@ watch(currentPage, () => {
                   >
                     {{ time }}
                   </button>
-                  <span v-if="startTimeOptions.length === 0">今日已无可预约时段</span>
+                  <span v-if="startTimeOptions.length === 0">{{ noTimeSlotText }}</span>
                 </div>
               </div>
             </label>
@@ -1107,7 +1207,7 @@ watch(currentPage, () => {
               <span>结束时间</span>
               <div class="time-picker" @click.stop>
                 <button class="time-picker__button" type="button" @click="toggleTimePicker('rooms-end')">
-                  {{ selectedEndTime || '请选择' }}
+                  {{ selectedEndTime || (!selectedStartTime || endTimeOptions.length === 0 ? noTimeSlotText : '请选择') }}
                   <ChevronRight />
                 </button>
                 <div v-if="timePickerOpen === 'rooms-end'" class="time-picker__menu">
@@ -1120,6 +1220,7 @@ watch(currentPage, () => {
                   >
                     {{ time }}
                   </button>
+                  <span v-if="endTimeOptions.length === 0">{{ noTimeSlotText }}</span>
                 </div>
               </div>
             </label>
@@ -1214,7 +1315,7 @@ watch(currentPage, () => {
                     <div class="slot-field__controls">
                       <div class="time-picker" @click.stop>
                         <button class="time-picker__button" type="button" @click="toggleTimePicker('detail-start')">
-                          {{ selectedStartTime || '今日已无可选' }}
+                          {{ selectedStartTime || noTimeSlotText }}
                           <ChevronRight />
                         </button>
                         <div v-if="timePickerOpen === 'detail-start'" class="time-picker__menu">
@@ -1227,12 +1328,12 @@ watch(currentPage, () => {
                           >
                             {{ time }}
                           </button>
-                          <span v-if="startTimeOptions.length === 0">今日已无可预约时段</span>
+                          <span v-if="startTimeOptions.length === 0">{{ noTimeSlotText }}</span>
                         </div>
                       </div>
                       <div class="time-picker" @click.stop>
                         <button class="time-picker__button" type="button" @click="toggleTimePicker('detail-end')">
-                          {{ selectedEndTime || '请选择' }}
+                          {{ selectedEndTime || (!selectedStartTime || endTimeOptions.length === 0 ? noTimeSlotText : '请选择') }}
                           <ChevronRight />
                         </button>
                         <div v-if="timePickerOpen === 'detail-end'" class="time-picker__menu">
@@ -1245,6 +1346,7 @@ watch(currentPage, () => {
                           >
                             {{ time }}
                           </button>
+                          <span v-if="endTimeOptions.length === 0">{{ noTimeSlotText }}</span>
                         </div>
                       </div>
                     </div>
@@ -1274,14 +1376,16 @@ watch(currentPage, () => {
               <p>{{ activeBooking.time }}</p>
               <div class="action-row">
                 <button
-                  :class="[activeBooking.status === '已签到' ? 'secondary-action' : 'primary-action', 'compact']"
+                  v-if="activeBooking.status === '待签到'"
+                  class="primary-action compact"
                   @click="handleCheckIn"
                 >
                   <CheckCircle2 />
                   签到
                 </button>
                 <button
-                  :class="[activeBooking.status === '已签到' ? 'primary-action' : 'secondary-action', 'compact']"
+                  v-if="activeBooking.status === '已签到'"
+                  class="primary-action compact"
                   @click="handleCheckOut"
                 >
                   签退

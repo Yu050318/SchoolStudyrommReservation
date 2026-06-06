@@ -192,15 +192,24 @@ async function handleRequest(req, res) {
 
     if (req.method === 'POST' && path === '/api/auth/register') {
       const body = await readBody(req)
-      if (!body.account || !body.name || !body.password) {
-        sendJson(res, 400, { message: '学号、姓名和密码不能为空' })
+      const email = body.email || body.phone
+      if (!body.account || !body.name || !email || !body.college || !body.className || !body.password) {
+        sendJson(res, 400, { message: '注册信息不能为空' })
+        return
+      }
+
+      const existing = await mysqlExec(`select id from users where account = ${sqlValue(body.account)} limit 1`, {
+        parseRows: true,
+      })
+      if (existing.length > 0) {
+        sendJson(res, 409, { message: '该学号已注册，请直接登录' })
         return
       }
 
       await mysqlExec(
         `insert into users (account, password, name, role, college, class_name, phone)
          values (${sqlValue(body.account)}, ${sqlValue(body.password)}, ${sqlValue(body.name)}, 'student',
-         '软件工程学院', ${sqlValue(body.className || '软件工程 2301')}, ${sqlValue(body.phone || '')})`,
+         ${sqlValue(body.college)}, ${sqlValue(body.className)}, ${sqlValue(email)})`,
       )
       const rows = await mysqlExec(`select * from users where account = ${sqlValue(body.account)} limit 1`, {
         parseRows: true,
@@ -282,9 +291,12 @@ async function handleRequest(req, res) {
          insert into bookings (user_id, room_id, seat_id, start_time, end_time, status)
          values (${sqlValue(body.userId)}, ${sqlValue(body.roomId)}, ${sqlValue(seatRows[0].id)},
          ${sqlValue(body.startTime || '2026-06-04 19:00:00')}, ${sqlValue(body.endTime || '2026-06-04 21:00:00')}, 'pending');
-         commit;`,
+         set @booking_id = last_insert_id();
+         commit;
+         select @booking_id as id;`,
+        { parseRows: true },
       )
-      sendJson(res, 201, { status: '待签到' })
+      sendJson(res, 201, { id: Number(bookingRows[0]?.id), status: '待签到' })
       return
     }
 
