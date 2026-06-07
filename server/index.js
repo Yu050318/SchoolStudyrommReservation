@@ -91,8 +91,57 @@ function bookingStatusToCn(status) {
   }[status] || status
 }
 
+function userCreditState(score) {
+  if (score >= 70) return '正常'
+  if (score >= 60) return '预警'
+  if (score >= 40) return '限制'
+  return '冻结'
+}
+
+async function updateBookingStatus(bookingId, status) {
+  const allowed = new Set(['pending', 'checked_in', 'completed', 'canceled'])
+  if (!allowed.has(status)) {
+    return { error: { statusCode: 400, message: '预约状态不正确' } }
+  }
+
+  const rows = await mysqlExec(
+    `select
+      seat_id,
+      user_id,
+      timestampdiff(minute, start_time, now()) as minutesLate,
+      timestampdiff(minute, now(), start_time) as minutesBefore
+     from bookings
+     where id = ${sqlValue(bookingId)}`,
+    { parseRows: true },
+  )
+  if (rows.length === 0) {
+    return { error: { statusCode: 404, message: '预约记录不存在' } }
+  }
+
+  const violation = getCreditViolation(
+    status,
+    Number(rows[0].minutesLate || 0),
+    Number(rows[0].minutesBefore || 0),
+  )
+  const seatStatus = status === 'completed' || status === 'canceled' ? 'free' : 'booked'
+  const violationSql = violation
+    ? `insert into violations (user_id, type, reason, status, happened_at)
+       values (${sqlValue(rows[0].user_id)}, ${sqlValue(violation.type)}, ${sqlValue(violation.reason)},
+       '未申诉', now());`
+    : ''
+  await mysqlExec(
+    `start transaction;
+     update bookings set status = ${sqlValue(status)} where id = ${sqlValue(bookingId)};
+     update seats set status = ${sqlValue(seatStatus)} where id = ${sqlValue(rows[0].seat_id)};
+     ${violationSql}
+     commit;`,
+  )
+  return { status: bookingStatusToCn(status), violation }
+}
+
 function violationScoreCase() {
   return `case
+    when status = '违规已撤回' then 0
     when type = '爽约' then -12
     when type = '开始后取消' then -8
     when type = '严重迟到' then -8
@@ -103,6 +152,17 @@ function violationScoreCase() {
     when type = '轻微迟到' then -2
     else 0
   end`
+}
+
+function splitAppealReason(row) {
+  const delimiter = '\n申诉理由：'
+  const reason = String(row.reason || '')
+  const [baseReason, ...appealParts] = reason.split(delimiter)
+  return {
+    ...row,
+    reason: baseReason,
+    appealReason: appealParts.join(delimiter).trim(),
+  }
 }
 
 function getCreditViolation(status, minutesLate, minutesBefore) {
@@ -144,7 +204,7 @@ function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   })
   res.end(JSON.stringify(payload))
@@ -285,7 +345,7 @@ async function handleRequest(req, res) {
         return
       }
 
-      await mysqlExec(
+      const bookingRows = await mysqlExec(
         `start transaction;
          update seats set status = 'booked' where id = ${sqlValue(seatRows[0].id)};
          insert into bookings (user_id, room_id, seat_id, start_time, end_time, status)
@@ -331,46 +391,48 @@ async function handleRequest(req, res) {
     const bookingStatusMatch = path.match(/^\/api\/bookings\/(\d+)\/status$/)
     if (req.method === 'PATCH' && bookingStatusMatch) {
       const body = await readBody(req)
-      const allowed = new Set(['pending', 'checked_in', 'completed', 'canceled'])
-      if (!allowed.has(body.status)) {
-        sendJson(res, 400, { message: '预约状态不正确' })
+      const result = await updateBookingStatus(bookingStatusMatch[1], body.status)
+      if (result.error) {
+        sendJson(res, result.error.statusCode, { message: result.error.message })
         return
       }
+      sendJson(res, 200, result)
+      return
+    }
 
+    const violationAppealMatch = path.match(/^\/api\/violations\/(\d+)\/appeal$/)
+    if (req.method === 'PATCH' && violationAppealMatch) {
+      const body = await readBody(req)
+      const appealReason = String(body.reason || '').trim()
+      if (!appealReason) {
+        sendJson(res, 400, { message: '请填写申诉理由' })
+        return
+      }
       const rows = await mysqlExec(
-        `select
-          seat_id,
-          user_id,
-          timestampdiff(minute, start_time, now()) as minutesLate,
-          timestampdiff(minute, now(), start_time) as minutesBefore
-         from bookings
-         where id = ${sqlValue(bookingStatusMatch[1])}`,
+        `select id, user_id, status, reason from violations where id = ${sqlValue(violationAppealMatch[1])} limit 1`,
         { parseRows: true },
       )
-      if (rows.length === 0) {
-        sendJson(res, 404, { message: '预约记录不存在' })
+      if (rows.length === 0 || String(rows[0].user_id) !== String(body.userId || '')) {
+        sendJson(res, 404, { message: '违规记录不存在' })
+        return
+      }
+      if (rows[0].status === '违规已撤回') {
+        sendJson(res, 409, { message: '该违规已撤回，无需申诉' })
+        return
+      }
+      if (rows[0].status === '申诉待处理') {
+        sendJson(res, 200, { status: '申诉待处理', message: '申诉已提交，请等待管理员审核' })
         return
       }
 
-      const violation = getCreditViolation(
-        body.status,
-        Number(rows[0].minutesLate || 0),
-        Number(rows[0].minutesBefore || 0),
-      )
-      const seatStatus = body.status === 'completed' || body.status === 'canceled' ? 'free' : 'booked'
-      const violationSql = violation
-        ? `insert into violations (user_id, type, reason, status, happened_at)
-           values (${sqlValue(rows[0].user_id)}, ${sqlValue(violation.type)}, ${sqlValue(violation.reason)},
-           '已处理', now());`
-        : ''
+      const cleanReason = String(rows[0].reason || '').split('\n申诉理由：')[0]
       await mysqlExec(
-        `start transaction;
-         update bookings set status = ${sqlValue(body.status)} where id = ${sqlValue(bookingStatusMatch[1])};
-         update seats set status = ${sqlValue(seatStatus)} where id = ${sqlValue(rows[0].seat_id)};
-         ${violationSql}
-         commit;`,
+        `update violations
+         set status = '申诉待处理',
+             reason = ${sqlValue(`${cleanReason}\n申诉理由：${appealReason}`)}
+         where id = ${sqlValue(violationAppealMatch[1])}`,
       )
-      sendJson(res, 200, { status: bookingStatusToCn(body.status), violation })
+      sendJson(res, 200, { status: '申诉待处理', message: '申诉已提交，请等待管理员审核' })
       return
     }
 
@@ -378,6 +440,7 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && violationMatch) {
       const rows = await mysqlExec(
         `select
+          id,
           date_format(happened_at, '%Y-%m-%d') as date,
           type,
           reason,
@@ -388,7 +451,9 @@ async function handleRequest(req, res) {
          order by happened_at desc`,
         { parseRows: true },
       )
-      sendJson(res, 200, { violations: rows })
+      sendJson(res, 200, {
+        violations: rows.map((row) => ({ ...splitAppealReason(row), id: Number(row.id) })),
+      })
       return
     }
 
@@ -401,7 +466,7 @@ async function handleRequest(req, res) {
             nullif((select count(*) from bookings), 0) * 100
           ), 0) as checkRate,
           (select count(*) from seats where status = 'free') as freeSeats,
-          (select count(*) from violations where status = '待处理') as pendingViolations`,
+          (select count(*) from violations where status = '申诉待处理') as pendingViolations`,
         { parseRows: true },
       )
       const stats = rows[0] || {}
@@ -411,6 +476,363 @@ async function handleRequest(req, res) {
         freeSeats: Number(stats.freeSeats || 0),
         pendingViolations: Number(stats.pendingViolations || 0),
       })
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/admin/bookings') {
+      const rows = await mysqlExec(
+        `select
+          b.id,
+          u.account,
+          u.name as user,
+          date_format(b.start_time, '%Y-%m-%d') as date,
+          r.name as room,
+          s.seat_no as seat,
+          concat(date_format(b.start_time, '%H:%i'), '-', date_format(b.end_time, '%H:%i')) as time,
+          b.status,
+          date_format(b.created_at, '%Y-%m-%d %H:%i') as createdAt
+        from bookings b
+        join users u on u.id = b.user_id
+        join rooms r on r.id = b.room_id
+        join seats s on s.id = b.seat_id
+        order by b.created_at desc, b.start_time desc`,
+        { parseRows: true },
+      )
+      sendJson(res, 200, {
+        bookings: rows.map((row) => ({
+          ...row,
+          id: Number(row.id),
+          status: bookingStatusToCn(row.status),
+        })),
+      })
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/admin/users') {
+      const rows = await mysqlExec(
+        `select
+          u.id,
+          u.account,
+          u.name,
+          u.college,
+          u.class_name as className,
+          u.phone,
+          coalesce(b.bookingCount, 0) as bookings,
+          100 + coalesce(v.scoreChange, 0) as credit
+        from users u
+        left join (
+          select user_id, count(*) as bookingCount
+          from bookings
+          group by user_id
+        ) b on b.user_id = u.id
+        left join (
+          select user_id, sum(${violationScoreCase()}) as scoreChange
+          from violations
+          group by user_id
+        ) v on v.user_id = u.id
+        where u.role = 'student'
+        order by u.id desc`,
+        { parseRows: true },
+      )
+      sendJson(res, 200, {
+        users: rows.map((row) => {
+          const credit = Number(row.credit || 0)
+          return {
+            ...row,
+            id: Number(row.id),
+            bookings: Number(row.bookings || 0),
+            credit,
+            status: userCreditState(credit),
+          }
+        }),
+      })
+      return
+    }
+
+    const adminUserMatch = path.match(/^\/api\/admin\/users\/(\d+)$/)
+    if (req.method === 'PATCH' && adminUserMatch) {
+      const userId = adminUserMatch[1]
+      const body = await readBody(req)
+      if (!body.name || !body.college || !body.className || !body.phone) {
+        sendJson(res, 400, { message: '学生姓名、学院、班级和联系方式不能为空' })
+        return
+      }
+
+      const rows = await mysqlExec(
+        `select id, account, role from users where id = ${sqlValue(userId)} limit 1`,
+        { parseRows: true },
+      )
+      if (rows.length === 0 || rows[0].role !== 'student') {
+        sendJson(res, 404, { message: '学生账号不存在' })
+        return
+      }
+
+      await mysqlExec(
+        `update users
+         set name = ${sqlValue(body.name)},
+             college = ${sqlValue(body.college)},
+             class_name = ${sqlValue(body.className)},
+             phone = ${sqlValue(body.phone)}
+             ${body.password ? `, password = ${sqlValue(body.password)}` : ''}
+         where id = ${sqlValue(userId)}`,
+      )
+      sendJson(res, 200, {
+        user: {
+          id: Number(userId),
+          account: rows[0].account,
+          name: body.name,
+          college: body.college,
+          className: body.className,
+          phone: body.phone,
+        },
+      })
+      return
+    }
+
+    if (req.method === 'DELETE' && adminUserMatch) {
+      const userId = adminUserMatch[1]
+      const rows = await mysqlExec(
+        `select id, account, name, role from users where id = ${sqlValue(userId)} limit 1`,
+        { parseRows: true },
+      )
+      if (rows.length === 0 || rows[0].role !== 'student') {
+        sendJson(res, 404, { message: '学生账号不存在' })
+        return
+      }
+
+      const relationRows = await mysqlExec(
+        `select
+          (select count(*) from bookings where user_id = ${sqlValue(userId)}) as bookings,
+          (select count(*) from violations where user_id = ${sqlValue(userId)}) as violations`,
+        { parseRows: true },
+      )
+      if (Number(relationRows[0]?.bookings || 0) > 0 || Number(relationRows[0]?.violations || 0) > 0) {
+        sendJson(res, 409, { message: '该学生已有预约或违规记录，不能直接删除' })
+        return
+      }
+
+      await mysqlExec(`delete from users where id = ${sqlValue(userId)}`)
+      sendJson(res, 200, { id: Number(userId), account: rows[0].account, name: rows[0].name })
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/admin/violations') {
+      const rows = await mysqlExec(
+        `select
+          v.id,
+          u.account,
+          u.name as user,
+          date_format(v.happened_at, '%Y-%m-%d') as date,
+          v.type,
+          v.reason,
+          v.status,
+          ${violationScoreCase()} as scoreChange
+        from violations v
+        join users u on u.id = v.user_id
+        where v.status = '申诉待处理'
+        order by v.happened_at desc`,
+        { parseRows: true },
+      )
+      sendJson(res, 200, {
+        violations: rows.map((row) => ({
+          ...splitAppealReason(row),
+          id: Number(row.id),
+          scoreChange: Number(row.scoreChange || 0),
+        })),
+      })
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/admin/seats') {
+      const roomId = url.searchParams.get('roomId')
+      const rows = await mysqlExec(
+        `select
+          s.id,
+          s.room_id as roomId,
+          r.name as room,
+          s.seat_no as seatNo,
+          s.status,
+          s.position_note as positionNote,
+          s.config
+        from seats s
+        join rooms r on r.id = s.room_id
+        where (${sqlValue(roomId)} is null or s.room_id = ${sqlValue(roomId)})
+        order by r.sort_order, s.seat_no`,
+        { parseRows: true },
+      )
+      sendJson(res, 200, { seats: rows.map((row) => ({ ...row, id: Number(row.id) })) })
+      return
+    }
+
+    if (req.method === 'POST' && path === '/api/admin/rooms') {
+      const body = await readBody(req)
+      const roomId = String(body.id || '').trim()
+      if (!roomId || !body.name || !body.location || !body.hours) {
+        sendJson(res, 400, { message: '自习室编号、名称、位置和开放时间不能为空' })
+        return
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(roomId)) {
+        sendJson(res, 400, { message: '自习室编号只能包含字母、数字、下划线和短横线' })
+        return
+      }
+
+      const existing = await mysqlExec(`select id from rooms where id = ${sqlValue(roomId)} limit 1`, { parseRows: true })
+      if (existing.length > 0) {
+        sendJson(res, 409, { message: '该自习室编号已存在' })
+        return
+      }
+
+      const facilities = Array.isArray(body.facilities)
+        ? body.facilities.map((item) => String(item).trim()).filter(Boolean)
+        : String(body.facilities || '')
+            .split(/[，,\s]+/)
+            .map((item) => item.trim())
+            .filter(Boolean)
+      const facilityJson = JSON.stringify(facilities)
+      const sortRows = await mysqlExec('select coalesce(max(sort_order), 0) + 1 as sortOrder from rooms', { parseRows: true })
+      const sortOrder = Number(sortRows[0]?.sortOrder || 1)
+      const seatValues = []
+      for (let index = 0; index < 48; index += 1) {
+        const row = String.fromCharCode(65 + Math.floor(index / 8))
+        const seatNo = `${row}${String((index % 8) + 1).padStart(2, '0')}`
+        const positionNote = `${row} 排 ${index % 8 + 1} 号`
+        seatValues.push(`(${sqlValue(roomId)}, ${sqlValue(seatNo)}, 'free', ${sqlValue(positionNote)}, '插座 / 台灯')`)
+      }
+
+      await mysqlExec(
+        `start transaction;
+         insert into rooms (id, name, location, open_hours, facilities, sort_order)
+         values (${sqlValue(roomId)}, ${sqlValue(body.name)}, ${sqlValue(body.location)}, ${sqlValue(body.hours)},
+         cast(${sqlValue(facilityJson)} as json), ${sqlValue(sortOrder)});
+         insert into seats (room_id, seat_no, status, position_note, config)
+         values ${seatValues.join(',')};
+         commit;`,
+      )
+      sendJson(res, 201, {
+        room: {
+          id: roomId,
+          name: body.name,
+          location: body.location,
+          hours: body.hours,
+          facilities,
+          seats: { free: 48, used: 0, maintenance: 0 },
+        },
+      })
+      return
+    }
+
+    const adminRoomMatch = path.match(/^\/api\/admin\/rooms\/([^/]+)$/)
+    if (req.method === 'DELETE' && adminRoomMatch) {
+      const roomId = decodeURIComponent(adminRoomMatch[1])
+      const rows = await mysqlExec(`select id, name from rooms where id = ${sqlValue(roomId)} limit 1`, { parseRows: true })
+      if (rows.length === 0) {
+        sendJson(res, 404, { message: '自习室不存在' })
+        return
+      }
+
+      const bookingRows = await mysqlExec(`select count(*) as total from bookings where room_id = ${sqlValue(roomId)}`, {
+        parseRows: true,
+      })
+      if (Number(bookingRows[0]?.total || 0) > 0) {
+        sendJson(res, 409, { message: '该自习室已有预约记录，不能直接删除' })
+        return
+      }
+
+      await mysqlExec(
+        `start transaction;
+         delete from seats where room_id = ${sqlValue(roomId)};
+         delete from rooms where id = ${sqlValue(roomId)};
+         commit;`,
+      )
+      sendJson(res, 200, { id: roomId, name: rows[0].name })
+      return
+    }
+
+    if (req.method === 'PATCH' && adminRoomMatch) {
+      const body = await readBody(req)
+      const roomId = decodeURIComponent(adminRoomMatch[1])
+      if (!body.name || !body.location || !body.hours) {
+        sendJson(res, 400, { message: '自习室名称、位置和开放时间不能为空' })
+        return
+      }
+
+      const facilities = Array.isArray(body.facilities)
+        ? body.facilities.map((item) => String(item).trim()).filter(Boolean)
+        : String(body.facilities || '')
+            .split(/[，,\s]+/)
+            .map((item) => item.trim())
+            .filter(Boolean)
+      const facilityJson = JSON.stringify(facilities)
+      const rows = await mysqlExec(`select id from rooms where id = ${sqlValue(roomId)} limit 1`, { parseRows: true })
+      if (rows.length === 0) {
+        sendJson(res, 404, { message: '自习室不存在' })
+        return
+      }
+
+      await mysqlExec(
+        `update rooms
+         set name = ${sqlValue(body.name)},
+             location = ${sqlValue(body.location)},
+             open_hours = ${sqlValue(body.hours)},
+             facilities = cast(${sqlValue(facilityJson)} as json)
+         where id = ${sqlValue(roomId)}`,
+      )
+      sendJson(res, 200, {
+        room: {
+          id: roomId,
+          name: body.name,
+          location: body.location,
+          hours: body.hours,
+          facilities,
+        },
+      })
+      return
+    }
+
+    const adminBookingStatusMatch = path.match(/^\/api\/admin\/bookings\/(\d+)\/status$/)
+    if (req.method === 'PATCH' && adminBookingStatusMatch) {
+      const body = await readBody(req)
+      const result = await updateBookingStatus(adminBookingStatusMatch[1], body.status)
+      if (result.error) {
+        sendJson(res, result.error.statusCode, { message: result.error.message })
+        return
+      }
+      sendJson(res, 200, result)
+      return
+    }
+
+    const adminSeatStatusMatch = path.match(/^\/api\/admin\/seats\/(\d+)\/status$/)
+    if (req.method === 'PATCH' && adminSeatStatusMatch) {
+      const body = await readBody(req)
+      const allowed = new Set(['free', 'used', 'booked', 'maintenance'])
+      if (!allowed.has(body.status)) {
+        sendJson(res, 400, { message: '座位状态不正确' })
+        return
+      }
+      await mysqlExec(`update seats set status = ${sqlValue(body.status)} where id = ${sqlValue(adminSeatStatusMatch[1])}`)
+      sendJson(res, 200, { status: body.status })
+      return
+    }
+
+    const adminViolationStatusMatch = path.match(/^\/api\/admin\/violations\/(\d+)\/status$/)
+    if (req.method === 'PATCH' && adminViolationStatusMatch) {
+      const body = await readBody(req)
+      const statusByAction = {
+        reject: '申诉已驳回',
+        revoke: '违规已撤回',
+      }
+      const status = statusByAction[body.action] || body.status || '申诉已驳回'
+      if (!['申诉已驳回', '违规已撤回', '申诉待处理'].includes(status)) {
+        sendJson(res, 400, { message: '违规处理状态不正确' })
+        return
+      }
+      await mysqlExec(
+        `update violations set status = ${sqlValue(status)} where id = ${sqlValue(adminViolationStatusMatch[1])}`,
+      )
+      const message = status === '违规已撤回'
+        ? '管理员已撤回本次违规，相关扣分已取消'
+        : '管理员已驳回本次申诉，违规扣分维持不变'
+      sendJson(res, 200, { status, message })
       return
     }
 

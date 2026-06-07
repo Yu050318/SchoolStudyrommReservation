@@ -40,18 +40,58 @@ const toastMessage = ref('')
 const profileMenuOpen = ref(false)
 const checkoutConfirmOpen = ref(false)
 const cancelConfirmOpen = ref(false)
+const appealDialogOpen = ref(false)
+const roomEditorOpen = ref(false)
+const bookingDetailOpen = ref(false)
+const roomDeleteConfirmOpen = ref(false)
+const userDeleteConfirmOpen = ref(false)
+const userDetailOpen = ref(false)
 const timePickerOpen = ref('')
 const beijingNow = ref(new Date())
 const currentUser = ref(null)
 const currentBookingId = ref(null)
 const apiOnline = ref(false)
+const liveSyncing = ref(false)
 const adminStats = ref({
   todayBookings: 328,
   checkRate: 87,
   freeSeats: 120,
   pendingViolations: 3,
 })
+const adminSelectedRoomId = ref('all')
+const editingRoomId = ref('')
+const selectedAdminBooking = ref(null)
+const selectedAppealViolation = ref(null)
+const pendingDeleteRoom = ref(null)
+const pendingDeleteUser = ref(null)
+const selectedAdminUser = ref(null)
+const roomEditorForm = ref({
+  id: '',
+  name: '',
+  location: '',
+  hours: '',
+  facilities: '',
+})
+const userEditorForm = ref({
+  name: '',
+  college: '',
+  className: '',
+  phone: '',
+  password: '',
+})
+const appealForm = ref({
+  reason: '',
+  customReason: '',
+})
+const appealReasonOptions = [
+  '签到设备异常，已到场但无法完成签到',
+  '预约时间或系统状态显示异常',
+  '突发课程、考试或学院事务冲突',
+  '身体不适或紧急情况影响到场',
+  '其他原因，手动填写',
+]
 const LOGIN_CACHE_KEY = 'study-room-last-login'
+const REGISTERED_USERS_CACHE_KEY = 'study-room-registered-users'
 
 function readSavedLogin(role = 'student') {
   try {
@@ -79,6 +119,33 @@ function saveLogin(role) {
   )
 }
 
+function readRegisteredUsers() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(REGISTERED_USERS_CACHE_KEY) || '[]')
+    return Array.isArray(saved) ? saved : []
+  } catch {
+    return []
+  }
+}
+
+function saveRegisteredUser(user) {
+  if (!user?.account) return
+  const rows = readRegisteredUsers()
+  const nextUser = {
+    account: user.account,
+    name: user.name || user.account,
+    college: user.college || '',
+    className: user.className || '',
+    phone: user.phone || '',
+    bookings: 0,
+    credit: 100,
+    status: '正常',
+  }
+  const nextRows = [nextUser, ...rows.filter((item) => item.account !== nextUser.account)]
+  window.localStorage.setItem(REGISTERED_USERS_CACHE_KEY, JSON.stringify(nextRows))
+  localRegisteredUsers.value = nextRows
+}
+
 const loginForm = ref(readSavedLogin('student'))
 const registerForm = ref({
   account: '',
@@ -97,6 +164,7 @@ const collegeOptions = [
 ]
 let toastTimer
 let clockTimer
+let liveTimer
 
 const allNavItems = [
   { key: 'home', label: '主页', icon: LayoutDashboard },
@@ -107,6 +175,16 @@ const allNavItems = [
   { key: 'admin', label: '管理员', icon: MonitorCog },
 ]
 
+const adminNavItems = [
+  { key: 'admin', label: '后台总览', icon: MonitorCog },
+  { key: 'adminRooms', label: '自习室管理', icon: DoorOpen },
+  { key: 'adminSeats', label: '座位管理', icon: BookOpen },
+  { key: 'adminBookings', label: '预约管理', icon: ClipboardList },
+  { key: 'adminUsers', label: '用户管理', icon: Users },
+  { key: 'adminViolations', label: '违规处理', icon: AlertTriangle },
+  { key: 'adminReports', label: '数据报表', icon: BarChart3 },
+]
+
 const pageMeta = {
   home: { title: '主页界面', subtitle: '系统功能入口与今日学习状态' },
   rooms: { title: '自习室列表界面', subtitle: '展示自习室和座位状态' },
@@ -114,6 +192,12 @@ const pageMeta = {
   booking: { title: '我的预约界面', subtitle: '预约记录、签到签退、取消' },
   violations: { title: '违规记录界面', subtitle: '违规信息展示' },
   admin: { title: '管理员后台界面', subtitle: '管理功能页面' },
+  adminRooms: { title: '自习室管理', subtitle: '维护开放时间、位置和容量信息' },
+  adminSeats: { title: '座位管理', subtitle: '查看座位状态并处理设备报修' },
+  adminBookings: { title: '预约管理', subtitle: '查看预约、签到、签退和取消记录' },
+  adminUsers: { title: '用户管理', subtitle: '维护学生账号、学院班级和权限状态' },
+  adminViolations: { title: '违规处理', subtitle: '复核违规记录、扣分和申诉状态' },
+  adminReports: { title: '数据报表', subtitle: '统计使用率、高峰时段和运营趋势' },
 }
 
 const rooms = ref([
@@ -239,12 +323,48 @@ const creditRules = [
 ]
 
 const adminModules = [
-  { title: '自习室管理', text: '新增、编辑开放时间与位置', icon: DoorOpen },
-  { title: '座位管理', text: '维护座位状态与设备信息', icon: BookOpen },
-  { title: '预约管理', text: '查看预约、签到签退记录', icon: ClipboardList },
-  { title: '用户管理', text: '学生账号和权限维护', icon: Users },
-  { title: '违规处理', text: '审核违规记录和限制策略', icon: AlertTriangle },
-  { title: '数据报表', text: '统计使用率与高峰时段', icon: BarChart3 },
+  { page: 'adminRooms', title: '自习室管理', text: '新增、编辑开放时间与位置', icon: DoorOpen },
+  { page: 'adminSeats', title: '座位管理', text: '维护座位状态与设备信息', icon: BookOpen },
+  { page: 'adminBookings', title: '预约管理', text: '查看预约、签到签退记录', icon: ClipboardList },
+  { page: 'adminUsers', title: '用户管理', text: '学生账号和权限维护', icon: Users },
+  { page: 'adminViolations', title: '违规处理', text: '审核违规记录和限制策略', icon: AlertTriangle },
+  { page: 'adminReports', title: '数据报表', text: '统计使用率与高峰时段', icon: BarChart3 },
+]
+
+const roomHourOptions = [
+  '07:00-23:00',
+  '07:30-23:00',
+  '07:30-22:30',
+  '07:30-22:00',
+  '08:00-22:00',
+  '08:00-21:30',
+  '09:00-21:30',
+]
+
+const fallbackAdminUsers = [
+  { account: '20230218', name: '林同学', college: '软件工程学院', className: '软件工程 2301', bookings: 18, credit: 88, status: '正常' },
+  { account: '20230406', name: '陈同学', college: '计算机科学学院', className: '数据科学 2301', bookings: 11, credit: 96, status: '正常' },
+  { account: '20230127', name: '赵同学', college: '信息管理学院', className: '电子商务 2301', bookings: 7, credit: 63, status: '预警' },
+  { account: '20230519', name: '周同学', college: '电子信息学院', className: '通信工程 2301', bookings: 4, credit: 42, status: '限制' },
+]
+
+const adminUsers = ref([])
+const adminBookings = ref([])
+const adminViolations = ref([])
+const adminSeats = ref([])
+const localRegisteredUsers = ref(readRegisteredUsers())
+
+const adminRepairRows = ref([
+  { room: '图书馆 B 区', seat: 'D04', issue: '插座无电', status: '待确认', reporter: '20230127' },
+  { room: '图书馆 B 区', seat: 'D05', issue: '台灯损坏', status: '处理中', reporter: '20230406' },
+  { room: '明德楼 302', seat: 'B12', issue: '座椅松动', status: '待确认', reporter: '巡检' },
+])
+
+const reportRows = [
+  { label: '07:30-09:30', value: 64, note: '早高峰' },
+  { label: '14:00-16:00', value: 78, note: '下午持续上升' },
+  { label: '19:00-21:00', value: 93, note: '晚间峰值' },
+  { label: '21:00-23:00', value: 71, note: '图书馆区域更集中' },
 ]
 
 const filterOptions = [
@@ -279,9 +399,7 @@ const adminProfile = {
 const selectedRoom = computed(() => rooms.value.find((room) => room.id === selectedRoomId.value) || rooms.value[0])
 const selectedSeat = computed(() => seats.value.find((seat) => seat.id === selectedSeatId.value) || seats.value[2])
 const isAdmin = computed(() => userRole.value === 'admin')
-const navItems = computed(() =>
-  isAdmin.value ? allNavItems.filter((item) => item.key === 'admin') : allNavItems.filter((item) => item.key !== 'admin'),
-)
+const navItems = computed(() => (isAdmin.value ? adminNavItems : allNavItems.filter((item) => item.key !== 'admin')))
 const currentProfile = computed(() => {
   if (!currentUser.value) {
     return isAdmin.value ? adminProfile : studentProfile
@@ -392,6 +510,75 @@ const filteredViolations = computed(() =>
 )
 const filteredAdminModules = computed(() =>
   adminModules.filter((item) => matchesSearch([item.title, item.text])),
+)
+const roomEditorHourOptions = computed(() => {
+  const current = roomEditorForm.value.hours
+  return current && !roomHourOptions.includes(current) ? [current, ...roomHourOptions] : roomHourOptions
+})
+const adminUserRows = computed(() => {
+  const source = adminUsers.value.length > 0 ? adminUsers.value : fallbackAdminUsers
+  const merged = [...localRegisteredUsers.value, ...source]
+  const seen = new Set()
+  return merged.filter((user) => {
+    if (!user?.account || seen.has(user.account)) return false
+    seen.add(user.account)
+    return true
+  })
+})
+const adminRoomOptions = computed(() => [
+  { id: 'all', name: '全部自习室' },
+  ...rooms.value.map((room) => ({ id: room.id, name: room.name })),
+])
+const adminRoomRows = computed(() =>
+  rooms.value.map((room) => ({
+    ...room,
+    total: room.seats.free + room.seats.used + room.seats.maintenance,
+    usage: Math.round((room.seats.used / Math.max(room.seats.free + room.seats.used + room.seats.maintenance, 1)) * 100),
+  })),
+)
+const adminSeatRows = computed(() => {
+  if (adminSeats.value.length > 0) {
+    return adminSeats.value.map((seat) => ({
+      id: seat.id,
+      seatNo: seat.seatNo,
+      room: seat.room,
+      area: seat.positionNote,
+      status: seatStatusLabel(seat.status),
+      apiStatus: seat.status,
+      equipment: seat.config,
+    }))
+  }
+  const rows = seats.value.map((seat, index) => ({
+    id: seat.id,
+    seatNo: seat.id,
+    room: selectedRoom.value.name,
+    area: `${String.fromCharCode(65 + Math.floor(index / 8))} 排`,
+    status: seatStatusLabel(seat.status),
+    apiStatus: seat.status,
+    equipment: index % 5 === 0 ? '插座报修' : index % 7 === 0 ? '台灯待检' : '设备正常',
+  }))
+  if (adminSelectedRoomId.value === 'all') return rows
+  return rows.map((row) => ({ ...row, room: rooms.value.find((room) => room.id === adminSelectedRoomId.value)?.name || row.room }))
+})
+const adminBookingRows = computed(() =>
+  adminBookings.value.length > 0
+    ? adminBookings.value
+    : historyRows.value.map((row, index) => ({
+        ...row,
+        user: ['林同学', '陈同学', '赵同学', '周同学'][index % 4],
+        account: ['20230218', '20230406', '20230127', '20230519'][index % 4],
+      })),
+)
+const adminViolationRows = computed(() =>
+  adminViolations.value.length > 0
+    ? adminViolations.value
+    : violations.value
+        .filter((item) => item.status === '申诉待处理')
+        .map((item, index) => ({
+          ...item,
+          user: item.user || ['林同学', '赵同学', '周同学'][index % 3],
+          account: item.account || ['20230218', '20230127', '20230519'][index % 3],
+        })),
 )
 const currentBeijing = computed(() => getBeijingSnapshot())
 const minBookingDate = computed(() => currentBeijing.value.date)
@@ -506,6 +693,7 @@ function toDateTimeRange(date, start, end) {
 }
 
 function getViolationScoreChange(item) {
+  if (item.status === '违规已撤回') return 0
   if (Number.isFinite(Number(item.scoreChange))) return Number(item.scoreChange)
   if (item.type.includes('爽约')) return -12
   if (item.type.includes('取消')) return -5
@@ -514,12 +702,302 @@ function getViolationScoreChange(item) {
   return 0
 }
 
+function canAppealViolation(item) {
+  return !['申诉待处理', '申诉已驳回', '违规已撤回'].includes(item.status)
+}
+
+function violationAppealText(item) {
+  if (item.status === '申诉待处理') return '申诉已提交，等待管理员审核。'
+  if (item.status === '申诉已驳回') return '管理员已驳回申诉，违规扣分维持不变。'
+  if (item.status === '违规已撤回') return '管理员已撤回本次违规，相关扣分已取消。'
+  return ''
+}
+
+function violationAppealActionLabel(item) {
+  if (item.status === '申诉待处理') return '审核中'
+  if (item.status === '申诉已驳回') return '已驳回'
+  if (item.status === '违规已撤回') return '已撤回'
+  return '申诉'
+}
+
+const selectedAppealReason = computed(() => {
+  if (appealForm.value.reason === '其他原因，手动填写') {
+    return appealForm.value.customReason.trim()
+  }
+  return appealForm.value.reason.trim()
+})
+
 function showToast(message) {
   toastMessage.value = message
   window.clearTimeout(toastTimer)
   toastTimer = window.setTimeout(() => {
     toastMessage.value = ''
   }, 2200)
+}
+
+function parseFacilityText(value) {
+  return String(value || '')
+    .split(/[，,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function openRoomEditor(room = null) {
+  const target = room || {
+    id: '',
+    name: '',
+    location: '',
+    hours: '',
+    facilities: [],
+  }
+  editingRoomId.value = target.id
+  roomEditorForm.value = {
+    id: target.id || '',
+    name: target.name || '',
+    location: target.location || '',
+    hours: target.hours || '',
+    facilities: (target.facilities || []).join('、'),
+  }
+  roomEditorOpen.value = true
+}
+
+function closeRoomEditor() {
+  roomEditorOpen.value = false
+  editingRoomId.value = ''
+}
+
+function openAdminBookingDetail(row) {
+  selectedAdminBooking.value = row
+  bookingDetailOpen.value = true
+}
+
+function closeAdminBookingDetail() {
+  bookingDetailOpen.value = false
+  selectedAdminBooking.value = null
+}
+
+function openRoomDeleteConfirm(room) {
+  pendingDeleteRoom.value = room
+  roomDeleteConfirmOpen.value = true
+}
+
+function closeRoomDeleteConfirm() {
+  roomDeleteConfirmOpen.value = false
+  pendingDeleteRoom.value = null
+}
+
+function removeRegisteredUser(account) {
+  const nextRows = readRegisteredUsers().filter((item) => item.account !== account)
+  window.localStorage.setItem(REGISTERED_USERS_CACHE_KEY, JSON.stringify(nextRows))
+  localRegisteredUsers.value = nextRows
+}
+
+function updateRegisteredUser(user) {
+  if (!user?.account) return
+  const rows = readRegisteredUsers()
+  if (!rows.some((item) => item.account === user.account)) return
+  const nextRows = rows.map((item) => (item.account === user.account ? { ...item, ...user } : item))
+  window.localStorage.setItem(REGISTERED_USERS_CACHE_KEY, JSON.stringify(nextRows))
+  localRegisteredUsers.value = nextRows
+}
+
+function openUserDetail(user) {
+  selectedAdminUser.value = user
+  userEditorForm.value = {
+    name: user.name || '',
+    college: user.college || '',
+    className: user.className || '',
+    phone: user.phone || '',
+    password: '',
+  }
+  userDetailOpen.value = true
+}
+
+function closeUserDetail() {
+  userDetailOpen.value = false
+  selectedAdminUser.value = null
+}
+
+function openUserDeleteConfirm(user) {
+  pendingDeleteUser.value = user
+  userDeleteConfirmOpen.value = true
+}
+
+function closeUserDeleteConfirm() {
+  userDeleteConfirmOpen.value = false
+  pendingDeleteUser.value = null
+}
+
+async function confirmDeleteRoom() {
+  const room = pendingDeleteRoom.value
+  if (!room?.id) return
+
+  try {
+    await apiRequest(`/admin/rooms/${encodeURIComponent(room.id)}`, {
+      method: 'DELETE',
+    })
+    rooms.value = rooms.value.filter((item) => item.id !== room.id)
+    if (selectedRoomId.value === room.id) {
+      selectedRoomId.value = rooms.value[0]?.id || ''
+    }
+    if (adminSelectedRoomId.value === room.id) {
+      adminSelectedRoomId.value = 'all'
+    }
+    closeRoomDeleteConfirm()
+    await refreshLiveData()
+    showToast(`${room.name} 已删除`)
+  } catch (error) {
+    closeRoomDeleteConfirm()
+    showToast(`删除失败：${error.message}`)
+  }
+}
+
+async function confirmDeleteUser() {
+  const user = pendingDeleteUser.value
+  if (!user?.account) return
+
+  if (!user.id) {
+    removeRegisteredUser(user.account)
+    adminUsers.value = adminUsers.value.filter((item) => item.account !== user.account)
+    closeUserDeleteConfirm()
+    showToast(`${user.name} 已从本地列表删除`)
+    return
+  }
+
+  try {
+    await apiRequest(`/admin/users/${user.id}`, {
+      method: 'DELETE',
+    })
+    adminUsers.value = adminUsers.value.filter((item) => item.id !== user.id)
+    removeRegisteredUser(user.account)
+    closeUserDeleteConfirm()
+    await refreshLiveData()
+    showToast(`${user.name} 已删除`)
+  } catch (error) {
+    closeUserDeleteConfirm()
+    showToast(`删除失败：${error.message}`)
+  }
+}
+
+async function saveUserDetail() {
+  const user = selectedAdminUser.value
+  const form = userEditorForm.value
+  if (!user?.account) return
+  if (!form.name.trim() || !form.college.trim() || !form.className.trim() || !form.phone.trim()) {
+    showToast('请完整填写姓名、学院、班级和联系方式')
+    return
+  }
+  if (form.password && form.password.length < 6) {
+    showToast('新密码至少需要 6 位')
+    return
+  }
+
+  const payload = {
+    name: form.name.trim(),
+    college: form.college.trim(),
+    className: form.className.trim(),
+    phone: form.phone.trim(),
+    ...(form.password ? { password: form.password } : {}),
+  }
+
+  if (!user.id) {
+    const nextUser = { ...user, ...payload }
+    updateRegisteredUser(nextUser)
+    closeUserDetail()
+    showToast(`${nextUser.name} 信息已保存`)
+    return
+  }
+
+  try {
+    await apiRequest(`/admin/users/${user.id}`, {
+      method: 'PATCH',
+      body: payload,
+    })
+    const nextUser = { ...user, ...payload }
+    adminUsers.value = adminUsers.value.map((item) => (item.id === user.id ? { ...item, ...nextUser } : item))
+    updateRegisteredUser(nextUser)
+    closeUserDetail()
+    await refreshLiveData()
+    showToast(`${nextUser.name} 信息已保存`)
+  } catch (error) {
+    const nextUser = { ...user, ...payload }
+    adminUsers.value = adminUsers.value.map((item) => (item.account === user.account ? { ...item, ...nextUser } : item))
+    updateRegisteredUser(nextUser)
+    closeUserDetail()
+    showToast(`接口暂不可用，已先更新页面展示：${error.message}`)
+  }
+}
+
+function bookingStatusNote(status) {
+  if (status === '待签到') return '学生尚未签到，可由管理员取消该预约并释放座位。'
+  if (status === '已签到') return '学生已到场，可在离场后由管理员确认签退。'
+  if (status === '已取消') return '预约已取消，座位已释放，该记录仅用于审计留存。'
+  if (status === '已签退') return '预约已正常结束，学习记录已归档。'
+  return '预约状态已归档。'
+}
+
+async function saveRoomEditor() {
+  const form = roomEditorForm.value
+  const facilities = parseFacilityText(form.facilities)
+  if (!form.name.trim() || !form.location.trim() || !form.hours.trim()) {
+    showToast('请完整填写自习室名称、位置和开放时间')
+    return
+  }
+  if (!editingRoomId.value && !form.id.trim()) {
+    showToast('请填写自习室编号')
+    return
+  }
+
+  const payload = {
+    id: form.id.trim(),
+    name: form.name.trim(),
+    location: form.location.trim(),
+    hours: form.hours.trim(),
+    facilities,
+  }
+  const roomId = editingRoomId.value
+
+  if (!roomId) {
+    try {
+      await apiRequest('/admin/rooms', {
+        method: 'POST',
+        body: payload,
+      })
+      await refreshLiveData()
+      closeRoomEditor()
+      showToast(`${payload.name} 已新增`)
+    } catch (error) {
+      const localRoom = {
+        id: payload.id,
+        name: payload.name,
+        location: payload.location,
+        hours: payload.hours,
+        facilities,
+        seats: { free: 48, used: 0, maintenance: 0 },
+      }
+      rooms.value = [localRoom, ...rooms.value.filter((room) => room.id !== localRoom.id)]
+      closeRoomEditor()
+      showToast(`接口暂不可用，已先添加到页面展示：${error.message}`)
+    }
+    return
+  }
+
+  try {
+    await apiRequest(`/admin/rooms/${encodeURIComponent(roomId)}`, {
+      method: 'PATCH',
+      body: payload,
+    })
+    await refreshLiveData()
+    closeRoomEditor()
+    showToast(`${payload.name} 信息已保存`)
+  } catch (error) {
+    const index = rooms.value.findIndex((room) => room.id === roomId)
+    if (index >= 0) {
+      rooms.value[index] = { ...rooms.value[index], ...payload }
+    }
+    closeRoomEditor()
+    showToast(`接口暂不可用，已先更新页面展示：${error.message}`)
+  }
 }
 
 async function loadRooms() {
@@ -565,12 +1043,53 @@ async function loadAdminStats() {
   adminStats.value = payload
 }
 
+async function loadAdminBookings() {
+  const payload = await apiRequest('/admin/bookings')
+  adminBookings.value = payload.bookings.map((row) => ({
+    ...row,
+    status: normalizeStatus(row.status),
+  }))
+}
+
+async function loadAdminUsers() {
+  const payload = await apiRequest('/admin/users')
+  adminUsers.value = payload.users
+}
+
+async function loadAdminViolations() {
+  const payload = await apiRequest('/admin/violations')
+  adminViolations.value = payload.violations.map((item) => ({
+    ...item,
+    scoreChange: Number(item.scoreChange ?? getViolationScoreChange(item)),
+  }))
+}
+
+async function loadAdminSeats(roomId = adminSelectedRoomId.value) {
+  const query = roomId && roomId !== 'all' ? `?roomId=${encodeURIComponent(roomId)}` : ''
+  const payload = await apiRequest(`/admin/seats${query}`)
+  adminSeats.value = payload.seats
+}
+
+async function loadAdminData() {
+  const results = await Promise.allSettled([
+    loadAdminStats(),
+    loadAdminBookings(),
+    loadAdminUsers(),
+    loadAdminViolations(),
+    loadAdminSeats(),
+  ])
+  const failed = results.find((result) => result.status === 'rejected')
+  if (failed) {
+    apiOnline.value = false
+  }
+}
+
 async function loadAppData(role = userRole.value) {
   try {
     await loadRooms()
     await loadSeats()
     if (role === 'admin') {
-      await loadAdminStats()
+      await loadAdminData()
     } else {
       await Promise.all([loadBookings(), loadViolations()])
     }
@@ -579,6 +1098,41 @@ async function loadAppData(role = userRole.value) {
     apiOnline.value = false
     showToast(`数据库未连接，当前使用演示数据：${error.message}`)
   }
+}
+
+async function refreshLiveData({ silent = true } = {}) {
+  if (authMode.value !== 'app' || liveSyncing.value) return
+  liveSyncing.value = true
+  try {
+    await loadRooms()
+    if (isAdmin.value) {
+      await loadAdminData()
+    } else {
+      await Promise.all([
+        loadBookings(),
+        loadViolations(),
+        loadSeats(selectedRoomId.value),
+      ])
+    }
+    apiOnline.value = true
+  } catch (error) {
+    apiOnline.value = false
+    if (!silent) showToast(`同步失败：${error.message}`)
+  } finally {
+    liveSyncing.value = false
+  }
+}
+
+function startLiveSync() {
+  window.clearInterval(liveTimer)
+  liveTimer = window.setInterval(() => {
+    refreshLiveData()
+  }, 5000)
+}
+
+function stopLiveSync() {
+  window.clearInterval(liveTimer)
+  liveTimer = null
 }
 
 async function loginAs(role = 'student') {
@@ -651,6 +1205,7 @@ async function registerAccount() {
       },
     })
     currentUser.value = payload.user
+    saveRegisteredUser(payload.user)
     apiOnline.value = true
     loginForm.value = {
       account: registerForm.value.account,
@@ -674,10 +1229,12 @@ async function enterApp(page = 'home', role = 'student') {
   profileMenuOpen.value = false
   currentBookingId.value = null
   await loadAppData(role)
+  startLiveSync()
   showToast(role === 'admin' ? '管理员登录成功' : mode === 'register' ? '注册成功，已进入系统' : '登录成功，欢迎回来')
 }
 
 function logout() {
+  stopLiveSync()
   profileMenuOpen.value = false
   currentUser.value = null
   userRole.value = 'student'
@@ -688,6 +1245,7 @@ function logout() {
 }
 
 function switchAccount() {
+  stopLiveSync()
   profileMenuOpen.value = false
   currentUser.value = null
   userRole.value = 'student'
@@ -700,7 +1258,7 @@ function switchAccount() {
 
 function goPage(page) {
   if (isAdmin.value) {
-    currentPage.value = 'admin'
+    currentPage.value = adminNavItems.some((item) => item.key === page) ? page : 'admin'
     return
   }
   if (page === 'admin' && !isAdmin.value) {
@@ -817,6 +1375,121 @@ async function updateBookingStatus(status) {
   showToast(`预约状态已更新为：${status}`)
 }
 
+async function updateAdminBookingStatus(row, status) {
+  if (!row?.id) return
+  try {
+    const payload = await apiRequest(`/admin/bookings/${row.id}/status`, {
+      method: 'PATCH',
+      body: { status: toApiBookingStatus(status) },
+    })
+    row.status = normalizeStatus(payload.status)
+    showToast(`已将 ${row.user} 的预约更新为：${normalizeStatus(payload.status)}`)
+    try {
+      await refreshLiveData()
+    } catch {
+      row.status = normalizeStatus(payload.status)
+    }
+  } catch (error) {
+    showToast(`更新预约失败：${error.message}`)
+  }
+}
+
+async function updateAdminSeatStatus(seat, status) {
+  if (!seat?.id || typeof seat.id !== 'number') {
+    showToast('演示座位暂不能写入数据库')
+    return
+  }
+  try {
+    await apiRequest(`/admin/seats/${seat.id}/status`, {
+      method: 'PATCH',
+      body: { status },
+    })
+    seat.apiStatus = status
+    seat.status = seatStatusLabel(status)
+    showToast(`${seat.room} ${seat.seatNo} 已更新为：${seatStatusLabel(status)}`)
+    try {
+      await refreshLiveData()
+    } catch {
+      seat.apiStatus = status
+      seat.status = seatStatusLabel(status)
+    }
+  } catch (error) {
+    showToast(`更新座位失败：${error.message}`)
+  }
+}
+
+function openAppealDialog(item) {
+  if (!canAppealViolation(item)) return
+  selectedAppealViolation.value = item
+  appealForm.value = {
+    reason: appealReasonOptions[0],
+    customReason: '',
+  }
+  appealDialogOpen.value = true
+}
+
+function closeAppealDialog() {
+  appealDialogOpen.value = false
+  selectedAppealViolation.value = null
+  appealForm.value = {
+    reason: '',
+    customReason: '',
+  }
+}
+
+async function submitViolationAppeal(item, reason) {
+  if (!item) return
+  const appealReason = String(reason || '').trim()
+  if (!appealReason) {
+    showToast('请选择或填写申诉理由')
+    return
+  }
+  if (!item.id || String(item.id).startsWith('local-')) {
+    item.status = '申诉待处理'
+    item.appealReason = appealReason
+    showToast('申诉已提交，等待管理员审核')
+    closeAppealDialog()
+    return
+  }
+
+  try {
+    const payload = await apiRequest(`/violations/${item.id}/appeal`, {
+      method: 'PATCH',
+      body: { userId: currentUser.value?.id, reason: appealReason },
+    })
+    item.status = payload.status || '申诉待处理'
+    item.appealReason = appealReason
+    await loadViolations()
+    closeAppealDialog()
+    showToast(payload.message || '申诉已提交，等待管理员审核')
+  } catch (error) {
+    showToast(`申诉提交失败：${error.message}`)
+  }
+}
+
+async function confirmViolationAppeal() {
+  await submitViolationAppeal(selectedAppealViolation.value, selectedAppealReason.value)
+}
+
+async function resolveAdminViolation(item, action = 'reject') {
+  if (!item?.id) return
+  try {
+    const payload = await apiRequest(`/admin/violations/${item.id}/status`, {
+      method: 'PATCH',
+      body: { action },
+    })
+    item.status = payload.status
+    showToast(payload.message || `申诉已处理：${payload.status}`)
+    try {
+      await refreshLiveData()
+    } catch {
+      adminViolations.value = adminViolations.value.filter((row) => row.id !== item.id)
+    }
+  } catch (error) {
+    showToast(`复核失败：${error.message}`)
+  }
+}
+
 async function handleCheckIn() {
   if (!activeBooking.value) {
     showToast('当前还没有预约')
@@ -887,6 +1560,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.clearInterval(clockTimer)
+  stopLiveSync()
 })
 
 watch(selectedDate, () => {
@@ -898,10 +1572,20 @@ watch(() => registerForm.value.college, () => {
   registerForm.value.className = ''
 })
 
+watch(adminSelectedRoomId, async () => {
+  if (!isAdmin.value || authMode.value !== 'app') return
+  try {
+    await loadAdminSeats()
+  } catch (error) {
+    showToast(`座位同步失败：${error.message}`)
+  }
+})
+
 watch(currentPage, () => {
   if (!showSearchBox.value) {
     searchText.value = ''
   }
+  refreshLiveData()
 })
 </script>
 
@@ -1136,6 +1820,236 @@ watch(currentPage, () => {
             <div class="confirm-actions">
               <button class="secondary-action compact" type="button" @click="cancelConfirmOpen = false">暂不取消</button>
               <button class="danger-action compact" type="button" @click="confirmCancelBooking">确认取消</button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
+        <div v-if="appealDialogOpen && selectedAppealViolation" class="confirm-mask" @click.self="closeAppealDialog">
+          <section class="confirm-dialog appeal-dialog" role="dialog" aria-modal="true" aria-labelledby="appeal-title">
+            <div class="confirm-icon">
+              <AlertTriangle />
+            </div>
+            <h2 id="appeal-title">提交违规申诉</h2>
+            <p>
+              针对「{{ selectedAppealViolation.type }}」提交申诉理由，管理员会在违规处理界面复核。
+            </p>
+            <div class="appeal-dialog__form">
+              <label>
+                <span>申诉理由</span>
+                <select v-model="appealForm.reason">
+                  <option v-for="reason in appealReasonOptions" :key="reason" :value="reason">{{ reason }}</option>
+                </select>
+              </label>
+              <label v-if="appealForm.reason === '其他原因，手动填写'">
+                <span>自定义理由</span>
+                <textarea v-model="appealForm.customReason" rows="4" maxlength="160" placeholder="请简要说明申诉原因"></textarea>
+              </label>
+            </div>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="closeAppealDialog">取消</button>
+              <button class="primary-action compact" type="button" @click="confirmViolationAppeal">提交申诉</button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
+        <div v-if="roomEditorOpen" class="confirm-mask" @click.self="closeRoomEditor">
+          <section class="confirm-dialog room-editor" role="dialog" aria-modal="true" aria-labelledby="room-editor-title">
+            <div class="confirm-icon">
+              <DoorOpen />
+            </div>
+            <h2 id="room-editor-title">{{ editingRoomId ? '编辑自习室' : '新增自习室' }}</h2>
+            <div class="room-editor__form">
+              <label>
+                <span>自习室编号</span>
+                <input v-model="roomEditorForm.id" :disabled="Boolean(editingRoomId)" placeholder="例如 new-study-room" />
+              </label>
+              <label>
+                <span>自习室名称</span>
+                <input v-model="roomEditorForm.name" placeholder="请输入自习室名称" />
+              </label>
+              <label>
+                <span>位置</span>
+                <input v-model="roomEditorForm.location" placeholder="请输入位置" />
+              </label>
+              <label>
+                <span>开放时间</span>
+                <select v-model="roomEditorForm.hours">
+                  <option value="" disabled>请选择开放时间</option>
+                  <option v-for="hours in roomEditorHourOptions" :key="hours" :value="hours">
+                    {{ hours }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                <span>设施标签</span>
+                <input v-model="roomEditorForm.facilities" placeholder="用顿号、逗号或空格分隔" />
+              </label>
+            </div>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="closeRoomEditor">取消</button>
+              <button class="primary-action compact" type="button" @click="saveRoomEditor">保存</button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
+        <div v-if="bookingDetailOpen && selectedAdminBooking" class="confirm-mask" @click.self="closeAdminBookingDetail">
+          <section class="confirm-dialog booking-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="booking-detail-title">
+            <div class="confirm-icon">
+              <ClipboardList />
+            </div>
+            <div class="detail-head booking-detail-head">
+              <h2 id="booking-detail-title">预约详情</h2>
+              <span class="badge success">{{ selectedAdminBooking.status }}</span>
+            </div>
+            <dl class="booking-detail-list">
+              <div>
+                <dt>学生</dt>
+                <dd>{{ selectedAdminBooking.user || '未知学生' }}</dd>
+              </div>
+              <div>
+                <dt>账号</dt>
+                <dd>{{ selectedAdminBooking.account || '-' }}</dd>
+              </div>
+              <div>
+                <dt>自习室</dt>
+                <dd>{{ selectedAdminBooking.room }}</dd>
+              </div>
+              <div>
+                <dt>座位</dt>
+                <dd>{{ selectedAdminBooking.seat }}</dd>
+              </div>
+              <div>
+                <dt>日期</dt>
+                <dd>{{ selectedAdminBooking.date }}</dd>
+              </div>
+              <div>
+                <dt>时段</dt>
+                <dd>{{ selectedAdminBooking.time }}</dd>
+              </div>
+              <div v-if="selectedAdminBooking.createdAt">
+                <dt>创建时间</dt>
+                <dd>{{ selectedAdminBooking.createdAt }}</dd>
+              </div>
+            </dl>
+            <p class="booking-detail-note">{{ bookingStatusNote(selectedAdminBooking.status) }}</p>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="closeAdminBookingDetail">关闭</button>
+              <button
+                v-if="selectedAdminBooking.status === '待签到'"
+                class="danger-action compact"
+                type="button"
+                @click="updateAdminBookingStatus(selectedAdminBooking, '已取消')"
+              >
+                取消预约
+              </button>
+              <button
+                v-if="selectedAdminBooking.status === '已签到'"
+                class="primary-action compact"
+                type="button"
+                @click="updateAdminBookingStatus(selectedAdminBooking, '已签退')"
+              >
+                确认签退
+              </button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
+        <div v-if="roomDeleteConfirmOpen && pendingDeleteRoom" class="confirm-mask" @click.self="closeRoomDeleteConfirm">
+          <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="room-delete-title">
+            <div class="confirm-icon">
+              <AlertTriangle />
+            </div>
+            <h2 id="room-delete-title">删除自习室？</h2>
+            <p>
+              将删除「{{ pendingDeleteRoom.name }}」及其座位信息。若该自习室已有预约记录，系统会阻止删除以保留历史数据。
+            </p>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="closeRoomDeleteConfirm">取消</button>
+              <button class="danger-action compact" type="button" @click="confirmDeleteRoom">确认删除</button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
+        <div v-if="userDeleteConfirmOpen && pendingDeleteUser" class="confirm-mask" @click.self="closeUserDeleteConfirm">
+          <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="user-delete-title">
+            <div class="confirm-icon">
+              <AlertTriangle />
+            </div>
+            <h2 id="user-delete-title">删除学生账号？</h2>
+            <p>
+              将删除「{{ pendingDeleteUser.name }}」的学生账号。若该学生已有预约或违规记录，系统会阻止删除以保留历史数据。
+            </p>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="closeUserDeleteConfirm">取消</button>
+              <button class="danger-action compact" type="button" @click="confirmDeleteUser">确认删除</button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
+        <div v-if="userDetailOpen && selectedAdminUser" class="confirm-mask" @click.self="closeUserDetail">
+          <section class="confirm-dialog user-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="user-detail-title">
+            <div class="confirm-icon">
+              <Users />
+            </div>
+            <div class="detail-head booking-detail-head">
+              <h2 id="user-detail-title">学生账号详情</h2>
+              <span class="badge success">{{ selectedAdminUser.status }}</span>
+            </div>
+            <dl class="booking-detail-list">
+              <div>
+                <dt>账号</dt>
+                <dd>{{ selectedAdminUser.account }}</dd>
+              </div>
+              <div>
+                <dt>预约次数</dt>
+                <dd>{{ selectedAdminUser.bookings }} 次</dd>
+              </div>
+              <div>
+                <dt>信用分</dt>
+                <dd>{{ selectedAdminUser.credit }}</dd>
+              </div>
+              <div>
+                <dt>账号状态</dt>
+                <dd>{{ selectedAdminUser.status }}</dd>
+              </div>
+            </dl>
+            <div class="room-editor__form user-detail-form">
+              <label>
+                <span>姓名</span>
+                <input v-model="userEditorForm.name" placeholder="请输入姓名" />
+              </label>
+              <label>
+                <span>学院</span>
+                <input v-model="userEditorForm.college" placeholder="请输入学院" />
+              </label>
+              <label>
+                <span>班级</span>
+                <input v-model="userEditorForm.className" placeholder="请输入班级" />
+              </label>
+              <label>
+                <span>邮箱 / 电话</span>
+                <input v-model="userEditorForm.phone" placeholder="请输入邮箱或电话" />
+              </label>
+              <label class="user-detail-form__wide">
+                <span>新密码</span>
+                <input v-model="userEditorForm.password" type="password" autocomplete="new-password" placeholder="留空则不修改密码" />
+              </label>
+            </div>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="closeUserDetail">关闭</button>
+              <button class="primary-action compact" type="button" @click="saveUserDetail">保存修改</button>
             </div>
           </section>
         </div>
@@ -1447,11 +2361,20 @@ watch(currentPage, () => {
                 <div>
                   <strong>{{ item.type }}</strong>
                   <p>{{ item.reason }}</p>
+                  <small v-if="item.appealReason">申诉理由：{{ item.appealReason }}</small>
+                  <small v-if="violationAppealText(item)">{{ violationAppealText(item) }}</small>
                 </div>
                 <span>{{ item.date }}</span>
                 <b>{{ getViolationScoreChange(item) }}分</b>
                 <em>{{ item.status }}</em>
-                <button class="appeal-action" type="button" @click="showToast('申诉申请已提交，等待管理员审核')">申诉</button>
+                <button
+                  class="appeal-action"
+                  type="button"
+                  :disabled="!canAppealViolation(item)"
+                  @click="openAppealDialog(item)"
+                >
+                  {{ violationAppealActionLabel(item) }}
+                </button>
               </div>
               <div v-if="filteredViolations.length === 0" class="empty-inline">
                 没有找到匹配的违规记录
@@ -1491,7 +2414,7 @@ watch(currentPage, () => {
                 <h3>{{ item.title }}</h3>
                 <p>{{ item.text }}</p>
               </div>
-              <button class="secondary-action compact">管理</button>
+              <button class="secondary-action compact" @click="goPage(item.page)">管理</button>
             </article>
             <article v-if="filteredAdminModules.length === 0" class="card empty-state">
               <Search />
@@ -1506,8 +2429,244 @@ watch(currentPage, () => {
               <h3>待处理事项</h3>
               <p>图书馆 B 区 4 个座位报修待确认 · 3 条违规记录待复核 · 明德楼 302 需更新开放时间</p>
             </div>
-            <button class="primary-action compact">去处理</button>
+            <button class="primary-action compact" @click="goPage('adminViolations')">去处理</button>
           </article>
+        </template>
+
+        <template v-else-if="currentPage === 'adminRooms'">
+          <section class="admin-module">
+            <div class="admin-module__toolbar">
+              <div>
+                <h2>自习室开放维护</h2>
+                <p>按教学楼查看开放时间、容量和实时使用率。</p>
+              </div>
+              <button class="primary-action compact" @click="openRoomEditor()">新增自习室</button>
+            </div>
+            <div class="admin-table card">
+              <div class="admin-table__head admin-table__room">
+                <span>自习室</span>
+                <span>位置</span>
+                <span>开放时间</span>
+                <span>容量</span>
+                <span>使用率</span>
+                <span>操作</span>
+              </div>
+              <div v-for="room in adminRoomRows" :key="room.id" class="admin-table__row admin-table__room">
+                <strong>{{ room.name }}</strong>
+                <span>{{ room.location }}</span>
+                <span>{{ room.hours }}</span>
+                <span>{{ room.total }} 座</span>
+                <div class="meter"><i :style="{ '--meter': `${room.usage}%` }"></i><b>{{ room.usage }}%</b></div>
+                <div class="admin-row-actions">
+                  <button class="secondary-action compact" @click="openRoomEditor(room)">编辑</button>
+                  <button class="danger-action compact" @click="openRoomDeleteConfirm(room)">删除</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="currentPage === 'adminSeats'">
+          <section class="admin-module">
+            <div class="admin-module__toolbar">
+              <div>
+                <h2>座位状态巡检</h2>
+                <p>筛选自习室，统一维护座位占用、预约和设备状态。</p>
+              </div>
+              <label class="admin-select">
+                <span>自习室</span>
+                <select v-model="adminSelectedRoomId">
+                  <option v-for="room in adminRoomOptions" :key="room.id" :value="room.id">{{ room.name }}</option>
+                </select>
+              </label>
+            </div>
+            <div class="seat-status-strip admin-seat-strip">
+              <span class="free">空闲 {{ seatStats.free }}</span>
+              <span class="booked">已预约 {{ seatStats.booked }}</span>
+              <span class="used">已占 {{ seatStats.used }}</span>
+              <span class="maintenance">维修 {{ seatStats.maintenance }}</span>
+            </div>
+            <div class="admin-seat-grid">
+              <article v-for="seat in adminSeatRows" :key="seat.id" class="card admin-seat-card">
+                <strong>{{ seat.seatNo }}</strong>
+                <span :class="['badge', seat.status === '空闲' ? 'success' : seat.status === '维修' ? 'danger' : 'warning']">
+                  {{ seat.status }}
+                </span>
+                <p>{{ seat.room }} · {{ seat.area }}</p>
+                <em>{{ seat.equipment }}</em>
+                <button
+                  class="secondary-action compact"
+                  @click="updateAdminSeatStatus(seat, seat.apiStatus === 'maintenance' ? 'free' : 'maintenance')"
+                >
+                  {{ seat.apiStatus === 'maintenance' ? '恢复空闲' : '设为维修' }}
+                </button>
+              </article>
+            </div>
+            <article class="card todo-card">
+              <Wrench />
+              <div>
+                <h3>报修队列</h3>
+                <p>{{ adminRepairRows.map((row) => `${row.room} ${row.seat} ${row.issue}`).join(' · ') }}</p>
+              </div>
+              <button class="primary-action compact" @click="showToast('已批量标记报修待确认')">批量处理</button>
+            </article>
+          </section>
+        </template>
+
+        <template v-else-if="currentPage === 'adminBookings'">
+          <section class="admin-module">
+            <div class="admin-module__toolbar">
+              <div>
+                <h2>预约与签到记录</h2>
+                <p>集中查看学生预约、签到、签退和取消状态。</p>
+              </div>
+              <button class="secondary-action compact" @click="showToast('预约记录已导出')">导出记录</button>
+            </div>
+            <div class="admin-table card">
+              <div class="admin-table__head admin-table__booking">
+                <span>学生</span>
+                <span>自习室 / 座位</span>
+                <span>日期</span>
+                <span>时段</span>
+                <span>状态</span>
+                <span>操作</span>
+              </div>
+              <div v-for="row in adminBookingRows" :key="`${row.date}-${row.account}-${row.seat}`" class="admin-table__row admin-table__booking">
+                <strong>{{ row.user }} · {{ row.account }}</strong>
+                <span>{{ row.room }} / {{ row.seat }}</span>
+                <span>{{ row.date }}</span>
+                <span>{{ row.time }}</span>
+                <em>{{ row.status }}</em>
+                <div class="admin-row-actions">
+                  <button class="secondary-action compact" @click="openAdminBookingDetail(row)">详情</button>
+                  <button
+                    v-if="row.status === '待签到'"
+                    class="danger-action compact"
+                    @click="updateAdminBookingStatus(row, '已取消')"
+                  >
+                    取消
+                  </button>
+                  <button
+                    v-if="row.status === '已签到'"
+                    class="primary-action compact"
+                    @click="updateAdminBookingStatus(row, '已签退')"
+                  >
+                    签退
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="currentPage === 'adminUsers'">
+          <section class="admin-module">
+            <div class="admin-module__toolbar">
+              <div>
+                <h2>学生账号维护</h2>
+                <p>查看账号、学院班级、预约次数和信用状态。</p>
+              </div>
+              <button class="primary-action compact" @click="showToast('已打开新增用户表单')">新增用户</button>
+            </div>
+            <div class="admin-table card">
+              <div class="admin-table__head admin-table__user">
+                <span>账号</span>
+                <span>姓名</span>
+                <span>学院 / 班级</span>
+                <span>预约次数</span>
+                <span>信用分</span>
+                <span>状态</span>
+                <span>操作</span>
+              </div>
+              <div v-for="user in adminUserRows" :key="user.account" class="admin-table__row admin-table__user">
+                <strong>{{ user.account }}</strong>
+                <span>{{ user.name }}</span>
+                <span>{{ user.college }} / {{ user.className }}</span>
+                <span>{{ user.bookings }} 次</span>
+                <b>{{ user.credit }}</b>
+                <em>{{ user.status }}</em>
+                <div class="admin-row-actions">
+                  <button class="secondary-action compact" @click="openUserDetail(user)">详情</button>
+                  <button class="danger-action compact" @click="openUserDeleteConfirm(user)">删除</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="currentPage === 'adminViolations'">
+          <section class="admin-module">
+            <div class="admin-module__toolbar">
+              <div>
+                <h2>违规复核中心</h2>
+                <p>处理迟到、临近取消、爽约和申诉记录。</p>
+              </div>
+              <button class="secondary-action compact" @click="showToast('违规策略已同步')">同步规则</button>
+            </div>
+            <div class="admin-table card">
+              <div class="admin-table__head admin-table__violation">
+                <span>学生</span>
+                <span>违规类型</span>
+                <span>原因</span>
+                <span>申诉理由</span>
+                <span>扣分</span>
+                <span>状态</span>
+                <span>操作</span>
+              </div>
+              <div v-for="item in adminViolationRows" :key="`${item.account}-${item.date}-${item.type}`" class="admin-table__row admin-table__violation">
+                <strong>{{ item.user }} · {{ item.account }}</strong>
+                <span>{{ item.type }}</span>
+                <span>{{ item.reason }}</span>
+                <span>{{ item.appealReason || '未填写' }}</span>
+                <b>{{ getViolationScoreChange(item) }} 分</b>
+                <em>{{ item.status }}</em>
+                <div class="admin-row-actions">
+                  <button class="danger-action compact" @click="resolveAdminViolation(item, 'reject')">驳回</button>
+                  <button class="primary-action compact" @click="resolveAdminViolation(item, 'revoke')">撤回违规</button>
+                </div>
+              </div>
+              <div v-if="adminViolationRows.length === 0" class="empty-inline">
+                暂无学生申诉的违规订单
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="currentPage === 'adminReports'">
+          <section class="admin-module">
+            <div class="admin-module__toolbar">
+              <div>
+                <h2>运营数据报表</h2>
+                <p>追踪使用率、签到率和高峰时段，为开放策略提供依据。</p>
+              </div>
+              <button class="secondary-action compact" @click="showToast('报表已生成')">生成报表</button>
+            </div>
+            <div class="report-grid">
+              <article class="card report-card">
+                <span>平均使用率</span>
+                <strong>76%</strong>
+                <p>较上周提升 8%，晚间峰值明显。</p>
+              </article>
+              <article class="card report-card">
+                <span>签到完成率</span>
+                <strong>{{ adminStats.checkRate }}%</strong>
+                <p>爽约率保持在 4% 以下。</p>
+              </article>
+              <article class="card report-card">
+                <span>设备完好率</span>
+                <strong>95%</strong>
+                <p>报修集中在图书馆 B 区。</p>
+              </article>
+            </div>
+            <div class="card report-panel">
+              <h3>高峰时段</h3>
+              <div v-for="row in reportRows" :key="row.label" class="report-row">
+                <span>{{ row.label }}</span>
+                <div class="meter"><i :style="{ '--meter': `${row.value}%` }"></i><b>{{ row.value }}%</b></div>
+                <em>{{ row.note }}</em>
+              </div>
+            </div>
+          </section>
         </template>
 
         <section v-if="currentPage === 'booking'" class="account-footer" aria-label="账户操作">
