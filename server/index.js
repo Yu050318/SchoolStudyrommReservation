@@ -123,7 +123,6 @@ async function updateBookingStatus(bookingId, status) {
     Number(rows[0].minutesLate || 0),
     Number(rows[0].minutesBefore || 0),
   )
-  const seatStatus = status === 'completed' || status === 'canceled' ? 'free' : 'booked'
   const violationSql = violation
     ? `insert into violations (user_id, type, reason, status, happened_at)
        values (${sqlValue(rows[0].user_id)}, ${sqlValue(violation.type)}, ${sqlValue(violation.reason)},
@@ -132,7 +131,6 @@ async function updateBookingStatus(bookingId, status) {
   await mysqlExec(
     `start transaction;
      update bookings set status = ${sqlValue(status)} where id = ${sqlValue(bookingId)};
-     update seats set status = ${sqlValue(seatStatus)} where id = ${sqlValue(rows[0].seat_id)};
      ${violationSql}
      commit;`,
   )
@@ -315,11 +313,35 @@ async function handleRequest(req, res) {
 
     const seatsMatch = path.match(/^\/api\/rooms\/([^/]+)\/seats$/)
     if (req.method === 'GET' && seatsMatch) {
+      const startTime = url.searchParams.get('startTime')
+      const endTime = url.searchParams.get('endTime')
       const rows = await mysqlExec(
-        `select seat_no as id, status, position_note as positionNote, config
-         from seats
-         where room_id = ${sqlValue(decodeURIComponent(seatsMatch[1]))}
-         order by seat_no`,
+        `select
+          s.seat_no as id,
+          case
+            when s.status = 'maintenance' then 'maintenance'
+            when exists (
+              select 1
+              from bookings b
+              where b.seat_id = s.id
+                and b.status = 'checked_in'
+                and (${sqlValue(startTime)} is null or (b.start_time < ${sqlValue(endTime)} and b.end_time > ${sqlValue(startTime)}))
+            ) then 'used'
+            when exists (
+              select 1
+              from bookings b
+              where b.seat_id = s.id
+                and b.status = 'pending'
+                and (${sqlValue(startTime)} is null or (b.start_time < ${sqlValue(endTime)} and b.end_time > ${sqlValue(startTime)}))
+            ) then 'booked'
+            when s.status in ('free', 'booked') then 'free'
+            else s.status
+          end as status,
+          s.position_note as positionNote,
+          s.config
+         from seats s
+         where s.room_id = ${sqlValue(decodeURIComponent(seatsMatch[1]))}
+         order by s.seat_no`,
         { parseRows: true },
       )
       sendJson(res, 200, { seats: rows })
@@ -328,6 +350,14 @@ async function handleRequest(req, res) {
 
     if (req.method === 'POST' && path === '/api/bookings') {
       const body = await readBody(req)
+      if (!body.userId || !body.roomId || !body.seatNo || !body.startTime || !body.endTime) {
+        sendJson(res, 400, { message: '预约用户、座位和时间段不能为空' })
+        return
+      }
+      if (new Date(body.startTime).getTime() >= new Date(body.endTime).getTime()) {
+        sendJson(res, 400, { message: '预约结束时间必须晚于开始时间' })
+        return
+      }
       const seatRows = await mysqlExec(
         `select id, status from seats
          where room_id = ${sqlValue(body.roomId)}
@@ -340,17 +370,31 @@ async function handleRequest(req, res) {
         sendJson(res, 404, { message: '座位不存在' })
         return
       }
-      if (seatRows[0].status !== 'free') {
-        sendJson(res, 409, { message: '该座位当前不可预约' })
+      if (seatRows[0].status === 'maintenance') {
+        sendJson(res, 409, { message: '该座位正在维修，暂不可预约' })
+        return
+      }
+
+      const conflictRows = await mysqlExec(
+        `select id
+         from bookings
+         where seat_id = ${sqlValue(seatRows[0].id)}
+           and status in ('pending', 'checked_in')
+           and start_time < ${sqlValue(body.endTime)}
+           and end_time > ${sqlValue(body.startTime)}
+         limit 1`,
+        { parseRows: true },
+      )
+      if (conflictRows.length > 0) {
+        sendJson(res, 409, { message: '该座位在所选时间段已被预约，请选择其他时间段' })
         return
       }
 
       const bookingRows = await mysqlExec(
         `start transaction;
-         update seats set status = 'booked' where id = ${sqlValue(seatRows[0].id)};
          insert into bookings (user_id, room_id, seat_id, start_time, end_time, status)
          values (${sqlValue(body.userId)}, ${sqlValue(body.roomId)}, ${sqlValue(seatRows[0].id)},
-         ${sqlValue(body.startTime || '2026-06-04 19:00:00')}, ${sqlValue(body.endTime || '2026-06-04 21:00:00')}, 'pending');
+         ${sqlValue(body.startTime)}, ${sqlValue(body.endTime)}, 'pending');
          set @booking_id = last_insert_id();
          commit;
          select @booking_id as id;`,

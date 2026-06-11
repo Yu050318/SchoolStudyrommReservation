@@ -83,6 +83,8 @@ class Booking(models.Model):
     seat = models.ForeignKey(Seat, on_delete=models.CASCADE, db_column="seat_id", related_name="bookings")
     start_time = models.DateTimeField(verbose_name="开始时间")
     end_time = models.DateTimeField(verbose_name="结束时间")
+    actual_check_in_at = models.DateTimeField(null=True, blank=True, verbose_name="实际签到时间")
+    actual_check_out_at = models.DateTimeField(null=True, blank=True, verbose_name="实际签退时间")
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending", verbose_name="状态")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 

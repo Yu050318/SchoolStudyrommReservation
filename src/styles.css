@@ -496,6 +496,13 @@ svg {
   line-height: 1.7;
 }
 
+.credit-warning {
+  display: block;
+  margin-top: 10px;
+  color: var(--danger);
+  font-weight: 900;
+}
+
 .room-editor {
   width: min(520px, 100%);
 }

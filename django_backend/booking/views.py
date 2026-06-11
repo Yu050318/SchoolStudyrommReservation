@@ -173,6 +173,17 @@ def split_appeal_reason(violation):
     }
 
 
+def format_datetime(value):
+    return value.strftime("%Y-%m-%d %H:%M:%S") if value else ""
+
+
+def booking_study_minutes(booking):
+    if not booking.actual_check_in_at:
+        return 0
+    end_time = booking.actual_check_out_at if booking.status == "completed" else datetime.now()
+    return max(0, int((end_time - booking.actual_check_in_at).total_seconds() // 60))
+
+
 def parse_booking_datetime(value, fallback):
     if not value:
         return fallback
@@ -336,6 +347,12 @@ def create_booking(request):
                 return api_response({"message": "预约用户不存在"}, status=404)
             if not Room.objects.filter(id=body.get("roomId")).exists():
                 return api_response({"message": "自习室不存在"}, status=404)
+            has_active_user_booking = Booking.objects.filter(
+                user_id=body.get("userId"),
+                status__in=["pending", "checked_in"],
+            ).exists()
+            if has_active_user_booking:
+                return api_response({"message": "当前已有待签到或已签到预约，请完成后再预约新座位"}, status=409)
             seat = Seat.objects.select_for_update().get(room_id=body.get("roomId"), seat_no=body.get("seatNo"))
             if seat.status == "maintenance":
                 return api_response({"message": "该座位正在维修，暂不可预约"}, status=409)
@@ -363,7 +380,7 @@ def create_booking(request):
 def user_bookings(request, user_id):
     if request.method != "GET":
         return api_response({"message": "方法不支持"}, status=405)
-    bookings = Booking.objects.select_related("room", "seat").filter(user_id=user_id)
+    bookings = Booking.objects.select_related("room", "seat").filter(user_id=user_id).order_by("-created_at", "-id")
     return api_response(
         {
             "bookings": [
@@ -374,6 +391,10 @@ def user_bookings(request, user_id):
                     "seat": booking.seat.seat_no,
                     "time": f"{booking.start_time:%H:%M}-{booking.end_time:%H:%M}",
                     "status": BOOKING_STATUS_CN.get(booking.status, booking.status),
+                    "actualCheckInAt": format_datetime(booking.actual_check_in_at),
+                    "actualCheckOutAt": format_datetime(booking.actual_check_out_at),
+                    "studyMinutes": booking_study_minutes(booking),
+                    "createdAt": format_datetime(booking.created_at),
                 }
                 for booking in bookings
             ]
@@ -417,7 +438,14 @@ def booking_status_core(request, booking_id):
             minutes_before = int((booking.start_time - now).total_seconds() // 60)
             violation = get_credit_violation(status, minutes_late, minutes_before)
             booking.status = status
-            booking.save(update_fields=["status"])
+            update_fields = ["status"]
+            if status == "checked_in" and not booking.actual_check_in_at:
+                booking.actual_check_in_at = now
+                update_fields.append("actual_check_in_at")
+            if status == "completed" and not booking.actual_check_out_at:
+                booking.actual_check_out_at = now
+                update_fields.append("actual_check_out_at")
+            booking.save(update_fields=update_fields)
             if violation:
                 Violation.objects.create(
                     user=booking.user,
@@ -429,7 +457,15 @@ def booking_status_core(request, booking_id):
     except Booking.DoesNotExist:
         return api_response({"message": "预约记录不存在"}, status=404)
 
-    return api_response({"status": BOOKING_STATUS_CN.get(status, status), "violation": violation})
+    return api_response(
+        {
+            "status": BOOKING_STATUS_CN.get(status, status),
+            "violation": violation,
+            "actualCheckInAt": format_datetime(booking.actual_check_in_at),
+            "actualCheckOutAt": format_datetime(booking.actual_check_out_at),
+            "studyMinutes": booking_study_minutes(booking),
+        }
+    )
 
 
 def user_violations(request, user_id):
@@ -493,6 +529,9 @@ def admin_bookings(request):
                     "seat": row.seat.seat_no,
                     "time": f"{row.start_time:%H:%M}-{row.end_time:%H:%M}",
                     "status": BOOKING_STATUS_CN.get(row.status, row.status),
+                    "actualCheckInAt": format_datetime(row.actual_check_in_at),
+                    "actualCheckOutAt": format_datetime(row.actual_check_out_at),
+                    "studyMinutes": booking_study_minutes(row),
                     "createdAt": row.created_at.strftime("%Y-%m-%d %H:%M"),
                 }
                 for row in rows

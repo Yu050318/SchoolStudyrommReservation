@@ -1,34 +1,25 @@
-# Django 后端方案
+# Django 后端
 
-这是对现有校园自习室预约系统的 Django 后端优化版本，保持现有 Vue 前端接口路径不变：
+这是校园自习室预约系统的主后端实现。前端仍然请求 `/api/...`，由 Vite 代理到 Django 服务。
 
-- 前端仍然请求 `/api/...`
-- 数据表沿用 `database/schema.sql` 中的 `users / rooms / seats / bookings / violations`
-- Django Admin 可用于后台数据维护
-- 当前 Node 后端仍保留，不影响原有功能
+## 启动
 
-## 本地启动
+在项目根目录双击：
+
+```text
+start-django-api.cmd
+```
+
+或手动执行：
 
 ```bash
 cd django_backend
 python manage.py runserver 127.0.0.1:3001
 ```
 
-然后继续使用原来的前端：
+## 数据库
 
-```bash
-npm run dev
-```
-
-## 连接 MySQL
-
-安装依赖：
-
-```bash
-pip install -r django_backend/requirements.txt
-```
-
-在项目根目录 `.env` 中加入：
+Django 会读取项目根目录 `.env`。连接 MySQL 时配置：
 
 ```text
 DB_ENGINE=mysql
@@ -39,22 +30,11 @@ DB_PASSWORD=你的密码
 DB_NAME=SchoolStudyroomReservation
 ```
 
-如果不设置 `DB_ENGINE=mysql`，Django 默认使用 `django_backend/db.sqlite3`，方便做代码自检和开发实验。
-
-当前项目根目录 `.env` 已配置为连接原来的 MySQL 数据库：
-
-```text
-DB_ENGINE=mysql
-DB_NAME=SchoolStudyroomReservation
-```
-
-Django 模型已按当前原库实际表结构适配。信用分不依赖额外字段，而是根据 `violations.type` 动态计算。
+如果不设置 `DB_ENGINE=mysql`，默认使用 `django_backend/db.sqlite3`。
 
 ## Django Admin
 
-如果只使用 Vue 前端和 `/api/...` 接口，不需要执行 Django 迁移命令。
-
-首次使用 Django 自带后台时，可以创建管理员账号：
+如果只使用 Vue 前端和 `/api/...` 接口，不需要执行 Django 迁移命令。需要使用 Django 自带后台时，可以执行：
 
 ```bash
 cd django_backend
@@ -68,7 +48,7 @@ python manage.py createsuperuser
 http://127.0.0.1:3001/admin/
 ```
 
-## 已兼容的 API
+## 已兼容接口
 
 - `POST /api/auth/login`
 - `POST /api/auth/register`
@@ -91,3 +71,10 @@ http://127.0.0.1:3001/admin/
 - `POST /api/admin/rooms`
 - `PATCH /api/admin/rooms/<room_id>`
 - `DELETE /api/admin/rooms/<room_id>`
+
+## 当前规则
+
+- 同一座位允许在同一天的不同时段被不同用户预约。
+- 只有所选时间段与已有 `pending` 或 `checked_in` 预约重叠时，才禁止预约。
+- 维修座位全时段不可预约。
+- 违规记录只有学生提交申诉后才进入管理员违规处理列表。

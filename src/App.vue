@@ -38,6 +38,7 @@ const selectedStartTime = ref('19:00')
 const selectedEndTime = ref('21:00')
 const toastMessage = ref('')
 const profileMenuOpen = ref(false)
+const checkinConfirmOpen = ref(false)
 const checkoutConfirmOpen = ref(false)
 const cancelConfirmOpen = ref(false)
 const appealDialogOpen = ref(false)
@@ -439,11 +440,20 @@ const seatStats = computed(() =>
     { free: 0, used: 0, booked: 0, maintenance: 0 },
   ),
 )
+
+function isActiveBookingStatus(status) {
+  return status === '待签到' || status === '已签到'
+}
+
+function findActiveBookingRow(preferredId = currentBookingId.value) {
+  const preferredRow = preferredId
+    ? historyRows.value.find((item) => item.id === preferredId && isActiveBookingStatus(item.status))
+    : null
+  return preferredRow || historyRows.value.find((item) => isActiveBookingStatus(item.status)) || null
+}
+
 const activeBooking = computed(() => {
-  if (!currentBookingId.value) return null
-  const row = historyRows.value.find(
-    (item) => item.id === currentBookingId.value && (item.status === '待签到' || item.status === '已签到'),
-  )
+  const row = findActiveBookingRow()
   if (!row) return null
 
   return {
@@ -453,6 +463,9 @@ const activeBooking = computed(() => {
     seat: row.seat,
     time: row.time,
     status: row.status,
+    actualCheckInAt: row.actualCheckInAt || '',
+    actualCheckOutAt: row.actualCheckOutAt || '',
+    studyMinutes: Number(row.studyMinutes || 0),
   }
 })
 const creditScore = computed(() => {
@@ -470,10 +483,17 @@ const creditState = computed(() => {
 const creditDelta = computed(() =>
   violations.value.reduce((total, item) => total + Math.min(getViolationScoreChange(item), 0), 0),
 )
+const todayStudyMinutes = computed(() =>
+  historyRows.value.reduce((total, row) => total + getTodayStudyMinutes(row), 0),
+)
+const todayStudyDuration = computed(() => formatStudyDuration(todayStudyMinutes.value))
+const activeCheckInWarning = computed(() => creditViolationWarning('已签到'))
+const activeCancelWarning = computed(() => creditViolationWarning('已取消'))
 const searchKeyword = computed(() => normalizeSearchValue(searchText.value))
 const homeStatCards = computed(() => [
   { label: '可预约座位', value: roomStats.value.free, note: '空闲' },
-  { label: '今日预约', value: historyRows.value.length, note: bookingStatus.value },
+  { label: '今日学习时长', value: todayStudyDuration.value, note: activeBooking.value ? '含当前进行中' : '实际签到至签退' },
+  { label: '信用分', value: creditScore.value, note: creditState.value.label },
   { label: '累计学习', value: '38h', note: '本月' },
   { label: '违规次数', value: violations.value.length, note: '已处理' },
 ])
@@ -503,7 +523,7 @@ const filteredSeats = computed(() =>
   seats.value.filter((seat) => matchesSearch([seat.id, seat.status, seatStatusLabel(seat.status)])),
 )
 const filteredHistoryRows = computed(() =>
-  historyRows.value.filter((row) => matchesSearch([row.date, row.room, row.seat, row.time, row.status])),
+  sortHistoryRows(historyRows.value.filter((row) => matchesSearch([row.date, row.room, row.seat, row.time, row.status]))),
 )
 const filteredViolations = computed(() =>
   violations.value.filter((item) => matchesSearch([item.date, item.type, item.reason, item.status])),
@@ -600,6 +620,18 @@ function normalizeSearchValue(value) {
   return String(value ?? '').trim().toLowerCase()
 }
 
+function bookingOrderValue(row) {
+  const createdAt = parseLocalDateTime(row.createdAt)
+  if (createdAt) return createdAt.getTime()
+  if (Number.isFinite(Number(row.id))) return Number(row.id)
+  const startAt = parseLocalDateTime(`${row.date} ${String(row.time || '').split('-')[0] || '00:00'}:00`)
+  return startAt ? startAt.getTime() : 0
+}
+
+function sortHistoryRows(rows) {
+  return [...rows].sort((a, b) => bookingOrderValue(b) - bookingOrderValue(a))
+}
+
 function matchesSearch(fields) {
   const keyword = searchKeyword.value
   if (!keyword) return true
@@ -635,6 +667,7 @@ function getBeijingSnapshot(date = beijingNow.value) {
   const valueOf = (type) => parts.find((part) => part.type === type)?.value || '00'
   return {
     date: `${valueOf('year')}-${valueOf('month')}-${valueOf('day')}`,
+    time: `${valueOf('hour')}:${valueOf('minute')}`,
     minutes: Number(valueOf('hour')) * 60 + Number(valueOf('minute')),
   }
 }
@@ -692,6 +725,70 @@ function toDateTimeRange(date, start, end) {
   }
 }
 
+function parseLocalDateTime(value) {
+  if (!value) return null
+  const normalized = String(value).replace(' ', 'T')
+  const parsed = new Date(normalized)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function formatLocalDateTime(date = new Date()) {
+  const snapshot = getBeijingSnapshot(date)
+  return `${snapshot.date} ${snapshot.time}:00`
+}
+
+function plannedStartDate(row = activeBooking.value) {
+  if (!row?.date || !row?.time) return null
+  const [start] = String(row.time).split('-')
+  return parseLocalDateTime(`${row.date} ${start}:00`)
+}
+
+function formatStudyDuration(minutes) {
+  const safeMinutes = Math.max(0, Math.floor(Number(minutes) || 0))
+  const hours = Math.floor(safeMinutes / 60)
+  const rest = safeMinutes % 60
+  if (hours <= 0) return `${rest}min`
+  return rest > 0 ? `${hours}h ${rest}min` : `${hours}h`
+}
+
+function getTodayStudyMinutes(row) {
+  const checkInAt = parseLocalDateTime(row.actualCheckInAt)
+  if (!checkInAt) return 0
+  const today = currentBeijing.value.date
+  const checkOutAt = parseLocalDateTime(row.actualCheckOutAt)
+  const end = checkOutAt || (row.status === '已签到' ? beijingNow.value : null)
+  if (!end) return Number(row.studyMinutes || 0)
+  const dayStart = parseLocalDateTime(`${today} 00:00:00`)
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000)
+  const effectiveStart = new Date(Math.max(checkInAt.getTime(), dayStart.getTime()))
+  const effectiveEnd = new Date(Math.min(end.getTime(), dayEnd.getTime()))
+  return Math.max(0, Math.floor((effectiveEnd - effectiveStart) / 60000))
+}
+
+function creditViolationFor(status, row = activeBooking.value) {
+  const startAt = plannedStartDate(row)
+  if (!startAt) return null
+  const now = beijingNow.value
+  if (status === '已签到') {
+    const minutesLate = Math.floor((now - startAt) / 60000)
+    if (minutesLate > 30) return { type: '严重迟到', scoreChange: -8 }
+    if (minutesLate > 15) return { type: '迟到签到', scoreChange: -5 }
+    if (minutesLate > 5) return { type: '轻微迟到', scoreChange: -2 }
+  }
+  if (status === '已取消') {
+    const minutesBefore = Math.floor((startAt - now) / 60000)
+    if (minutesBefore < 0) return { type: '开始后取消', scoreChange: -8 }
+    if (minutesBefore <= 10) return { type: '取消超时', scoreChange: -5 }
+    if (minutesBefore <= 30) return { type: '临近取消', scoreChange: -3 }
+  }
+  return null
+}
+
+function creditViolationWarning(status, row = activeBooking.value) {
+  const violation = creditViolationFor(status, row)
+  return violation ? `${violation.type}，本次操作将扣 ${Math.abs(violation.scoreChange)} 分。` : ''
+}
+
 function getViolationScoreChange(item) {
   if (item.status === '违规已撤回') return 0
   if (Number.isFinite(Number(item.scoreChange))) return Number(item.scoreChange)
@@ -727,12 +824,12 @@ const selectedAppealReason = computed(() => {
   return appealForm.value.reason.trim()
 })
 
-function showToast(message) {
+function showToast(message, duration = 2600) {
   toastMessage.value = message
   window.clearTimeout(toastTimer)
   toastTimer = window.setTimeout(() => {
     toastMessage.value = ''
-  }, 2200)
+  }, duration)
 }
 
 function parseFacilityText(value) {
@@ -1009,7 +1106,13 @@ async function loadRooms() {
 }
 
 async function loadSeats(roomId = selectedRoomId.value) {
-  const payload = await apiRequest(`/rooms/${roomId}/seats`)
+  const range = selectedStartTime.value && selectedEndTime.value
+    ? toDateTimeRange(selectedDate.value, selectedStartTime.value, selectedEndTime.value)
+    : null
+  const query = range
+    ? `?startTime=${encodeURIComponent(range.startTime)}&endTime=${encodeURIComponent(range.endTime)}`
+    : ''
+  const payload = await apiRequest(`/rooms/${roomId}/seats${query}`)
   seats.value = payload.seats
   const firstFreeSeat = payload.seats.find((seat) => seat.status === 'free')
   if (firstFreeSeat && !payload.seats.some((seat) => seat.id === selectedSeatId.value && seat.status === 'free')) {
@@ -1021,11 +1124,13 @@ async function loadBookings(userId = currentUser.value?.id) {
   if (!userId) return
 
   const payload = await apiRequest(`/bookings/${userId}`)
-  historyRows.value = payload.bookings.map((row) => ({
+  historyRows.value = sortHistoryRows(payload.bookings.map((row) => ({
     ...row,
     status: normalizeStatus(row.status),
-  }))
-  bookingStatus.value = activeBooking.value?.status || '暂无预约'
+  })))
+  const activeRow = findActiveBookingRow()
+  currentBookingId.value = activeRow?.id || null
+  bookingStatus.value = activeRow?.status || '暂无预约'
 }
 
 async function loadViolations(userId = currentUser.value?.id) {
@@ -1289,12 +1394,22 @@ function selectSeat(seat) {
 }
 
 async function reserveSeat() {
-  bookingStatus.value = '待签到'
   ensureValidTimeRange()
   if (!selectedStartTime.value || !selectedEndTime.value) {
     showToast('当前日期已无可预约时段')
     return
   }
+  if (activeBooking.value) {
+    showToast('当前已有待签到或已签到预约，请完成后再预约新座位')
+    currentPage.value = 'booking'
+    return
+  }
+  const liveSeat = seats.value.find((seat) => seat.id === selectedSeatId.value)
+  if (!liveSeat || liveSeat.status !== 'free') {
+    showToast('该座位当前不可预约，请选择空闲座位')
+    return
+  }
+  bookingStatus.value = '待签到'
   const bookingContext = {
     date: selectedDate.value,
     roomId: selectedRoom.value.id,
@@ -1338,6 +1453,7 @@ async function reserveSeat() {
       seat: bookingContext.seatNo,
       time: bookingContext.time,
       status: '待签到',
+      createdAt: formatLocalDateTime(beijingNow.value),
     }, ...historyRows.value]
     currentBookingId.value = localBookingId
   }
@@ -1346,8 +1462,23 @@ async function reserveSeat() {
 }
 
 async function updateBookingStatus(status) {
-  bookingStatus.value = status
   const bookingId = activeBooking.value?.id
+
+  if (bookingId && String(bookingId).startsWith('local-')) {
+    bookingStatus.value = status
+    const activeIndex = historyRows.value.findIndex((item) => item.id === bookingId)
+    if (activeIndex >= 0) {
+      const now = formatLocalDateTime(beijingNow.value)
+      historyRows.value[activeIndex] = {
+        ...historyRows.value[activeIndex],
+        status,
+        actualCheckInAt: status === '已签到' ? now : historyRows.value[activeIndex].actualCheckInAt,
+        actualCheckOutAt: status === '已签退' ? now : historyRows.value[activeIndex].actualCheckOutAt,
+      }
+    }
+    showToast(`预约状态已更新为：${status}`)
+    return
+  }
 
   if (bookingId) {
     try {
@@ -1356,15 +1487,26 @@ async function updateBookingStatus(status) {
         body: { status: toApiBookingStatus(status) },
       })
       bookingStatus.value = normalizeStatus(payload.status)
+      const activeIndex = historyRows.value.findIndex((item) => item.id === bookingId)
+      if (activeIndex >= 0) {
+        historyRows.value[activeIndex] = {
+          ...historyRows.value[activeIndex],
+          status: bookingStatus.value,
+          actualCheckInAt: payload.actualCheckInAt || historyRows.value[activeIndex].actualCheckInAt,
+          actualCheckOutAt: payload.actualCheckOutAt || historyRows.value[activeIndex].actualCheckOutAt,
+          studyMinutes: payload.studyMinutes ?? historyRows.value[activeIndex].studyMinutes,
+        }
+      }
       await Promise.all([loadBookings(), loadViolations(), loadRooms(), loadSeats(selectedRoomId.value)])
       apiOnline.value = true
       if (payload.violation) {
-        showToast(`${payload.violation.type}，信用分 ${payload.violation.scoreChange}`)
+        showToast(`${payload.violation.type}，信用分扣 ${Math.abs(payload.violation.scoreChange)} 分`, 4200)
         return
       }
     } catch (error) {
       apiOnline.value = false
-      showToast(`数据库更新失败，已先更新页面状态：${error.message}`)
+      showToast(`数据库更新失败，页面未保存本次操作：${error.message}`)
+      return
     }
   }
 
@@ -1499,6 +1641,15 @@ async function handleCheckIn() {
     showToast('已经签到，请勿重复签到')
     return
   }
+  if (activeCheckInWarning.value) {
+    checkinConfirmOpen.value = true
+    return
+  }
+  await updateBookingStatus('已签到')
+}
+
+async function confirmCheckIn() {
+  checkinConfirmOpen.value = false
   await updateBookingStatus('已签到')
 }
 
@@ -1519,7 +1670,7 @@ async function confirmCheckOut() {
   await updateBookingStatus('已签退')
   bookingStatus.value = '暂无预约'
   currentBookingId.value = null
-  showToast('签退成功，当前暂无预约')
+  showToast(`签退成功，今日学习时长 ${todayStudyDuration.value}`)
 }
 
 async function handleCancelBooking() {
@@ -1530,6 +1681,9 @@ async function handleCancelBooking() {
   if (activeBooking.value.status === '已签到') {
     showToast('已签到的预约不能取消，请签退')
     return
+  }
+  if (activeCancelWarning.value) {
+    showToast(activeCancelWarning.value, 4200)
   }
   cancelConfirmOpen.value = true
 }
@@ -1566,6 +1720,19 @@ onUnmounted(() => {
 watch(selectedDate, () => {
   ensureValidSelectedDate()
   ensureValidTimeRange()
+  if (!isAdmin.value && authMode.value === 'app') {
+    loadSeats(selectedRoomId.value).catch((error) => {
+      showToast(`座位状态同步失败：${error.message}`)
+    })
+  }
+})
+
+watch([selectedStartTime, selectedEndTime], () => {
+  if (!isAdmin.value && authMode.value === 'app') {
+    loadSeats(selectedRoomId.value).catch((error) => {
+      showToast(`座位状态同步失败：${error.message}`)
+    })
+  }
 })
 
 watch(() => registerForm.value.college, () => {
@@ -1790,6 +1957,24 @@ watch(currentPage, () => {
       </transition>
 
       <transition name="modal-fade">
+        <div v-if="checkinConfirmOpen" class="confirm-mask" @click.self="checkinConfirmOpen = false">
+          <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="checkin-title">
+            <div class="confirm-icon">
+              <AlertTriangle />
+            </div>
+            <h2 id="checkin-title">确认签到？</h2>
+            <p>
+              {{ activeCheckInWarning }}确认后系统会记录本次实际签到时间。
+            </p>
+            <div class="confirm-actions">
+              <button class="secondary-action compact" type="button" @click="checkinConfirmOpen = false">暂不签到</button>
+              <button class="primary-action compact" type="button" @click="confirmCheckIn">确认签到</button>
+            </div>
+          </section>
+        </div>
+      </transition>
+
+      <transition name="modal-fade">
         <div v-if="checkoutConfirmOpen" class="confirm-mask" @click.self="checkoutConfirmOpen = false">
           <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="checkout-title">
             <div class="confirm-icon">
@@ -1816,6 +2001,7 @@ watch(currentPage, () => {
             <h2 id="cancel-title">确认取消预约？</h2>
             <p>
               取消后当前预约将结束，并从当前预约区域隐藏。该记录仍会保留在预约记录中。
+              <strong v-if="activeCancelWarning" class="credit-warning">{{ activeCancelWarning }}</strong>
             </p>
             <div class="confirm-actions">
               <button class="secondary-action compact" type="button" @click="cancelConfirmOpen = false">暂不取消</button>
@@ -2321,7 +2507,7 @@ watch(currentPage, () => {
             </article>
             <article class="card booking-table">
               <h2>预约记录</h2>
-              <div v-for="row in filteredHistoryRows" :key="`${row.date}-${row.seat}`" class="table-row">
+              <div v-for="row in filteredHistoryRows" :key="row.id || `${row.createdAt}-${row.date}-${row.seat}-${row.time}`" class="table-row">
                 <span>{{ row.date }}</span>
                 <strong>{{ row.room }} / {{ row.seat }}</strong>
                 <span>{{ row.time }}</span>

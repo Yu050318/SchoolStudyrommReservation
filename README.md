@@ -1,100 +1,84 @@
-# 校园自习室预约系统 Vue3 + MySQL
+# 校园自习室预约系统
 
-基于设计稿实现的校园自习室预约系统，前端使用 Vue3 + Vite，后端使用 Node.js API 连接 MySQL。包含登录、注册、主页、自习室列表、座位详情、我的预约、违规记录、管理员后台 8 个界面。
+基于 Vue 3 + Vite + Django + MySQL 的校园自习室预约系统，包含学生端预约、签到签退、违规申诉，以及管理员后台的自习室、座位、预约、用户、违规和数据报表管理。
 
-## 1. 安装依赖
+## 启动方式
 
-```bash
-npm.cmd install
-```
-
-如果 npm 官方源很慢，可以使用国内镜像：
-
-```bash
-npm.cmd install --registry=https://registry.npmmirror.com
-```
-
-## 2. 准备数据库
-
-可以选择免费的云 MySQL，也可以用本地 MySQL。
-
-推荐免费云数据库：
-- Aiven for MySQL：适合直接拿到 MySQL 连接信息。
-- TiDB Cloud Serverless：MySQL 协议兼容，适合课程项目和演示。
-
-本地 MySQL 操作方式：
-
-```bash
-mysql -u root -p < database/schema.sql
-```
-
-然后复制 `.env.example` 为 `.env`，按你的数据库填写：
+以后统一使用 Django 后端。日常开发只需要启动两个脚本：
 
 ```text
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=你的密码
-DB_NAME=study_room_booking
-DB_SSL=false
+start-django-api.cmd
+start-dev.cmd
 ```
 
-如果使用云数据库，可以填写云厂商提供的连接串：
+`start-django-api.cmd` 启动后端接口：
 
 ```text
-DATABASE_URL=mysql://用户名:密码@主机:端口/数据库名
-DB_SSL=true
+http://127.0.0.1:3001/api
 ```
 
-## 3. 启动后端 API
-
-```bash
-npm.cmd run server
-```
-
-后端默认地址：
-
-```text
-http://127.0.0.1:3001
-```
-
-也可以双击 `start-api.cmd`。
-
-## 4. 启动前端
-
-另开一个终端：
-
-```bash
-npm.cmd run dev
-```
-
-默认访问地址：
+`start-dev.cmd` 启动前端页面：
 
 ```text
 http://127.0.0.1:5173
 ```
 
-前端会通过 Vite 代理访问 `/api`。如果后端或数据库没有启动，页面仍会进入演示模式，但会提示“数据库未连接”。
+前端会通过 Vite 代理访问 `/api`，所以后端必须先启动或保持运行。
+
+## 安装依赖
+
+前端依赖：
+
+```bash
+npm.cmd install
+```
+
+Django 后端依赖：
+
+```bash
+pip install -r django_backend/requirements.txt
+```
+
+## 数据库
+
+项目使用根目录 `.env` 配置数据库连接。连接 MySQL 时建议配置：
+
+```text
+DB_ENGINE=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=你的密码
+DB_NAME=SchoolStudyroomReservation
+```
+
+初始化 MySQL 数据库可执行：
+
+```bash
+mysql -u root -p < database/schema.sql
+```
+
+如果不配置 `DB_ENGINE=mysql`，Django 会使用 `django_backend/db.sqlite3` 作为本地开发数据库。
 
 ## 默认账号
 
-```text
 学生账号：
+
+```text
 20230218 / 123456
 20230219 / 123456
 20230220 / 123456
+```
 
 管理员账号：
+
+```text
 admin001 / admin123
 admin002 / admin123
 ```
 
-## 已实现
+## 后端约定
 
-- 桌面端：左侧导航 + 顶部栏 + 内容工作区。
-- 移动端：响应式布局 + 底部导航。
-- 自习室搜索、列表筛选展示、座位状态图。
-- 登录、注册、自习室、座位、预约、违规、管理员统计 API。
-- 空闲座位选择、立即预约、签到、签退、取消，并同步数据库。
-- 违规记录与管理员后台统计。
-- 操作成功提示、空搜索结果提示、座位状态统计。
+后续后端功能统一维护在 `django_backend/booking` 中。`server/index.js` 是早期 Node 版本实现，当前不再作为默认启动方式。
+
+当前 Django 后端已兼容前端所需的 `/api/...` 接口，包括登录注册、自习室和座位查询、按时间段预约、预约状态更新、违规申诉、管理员后台管理等。

@@ -209,6 +209,15 @@ class StudyRoomApiRegressionTests(TestCase):
 
     def test_create_booking_success_conflicts_and_boundaries(self):
         base = self.create_booking()
+        fresh_user = User.objects.create(
+            account="20239990",
+            password="123456",
+            name="边界同学",
+            role="student",
+            college="软件工程学院",
+            class_name="软件工程 2304",
+            phone="13900000090",
+        )
 
         adjacent = {
             "userId": self.other_student.id,
@@ -221,16 +230,25 @@ class StudyRoomApiRegressionTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(body["status"], "待签到")
 
-        overlapping = {**adjacent, "startTime": "2026-06-12T11:00:00", "endTime": "2026-06-12T13:00:00"}
+        duplicate_active_user = {
+            **adjacent,
+            "startTime": "2026-06-13T14:00:00",
+            "endTime": "2026-06-13T16:00:00",
+        }
+        response, _ = self.request_json("post", "/api/bookings", duplicate_active_user)
+        self.assertEqual(response.status_code, 409)
+
+        overlapping = {**adjacent, "userId": fresh_user.id, "startTime": "2026-06-12T11:00:00", "endTime": "2026-06-12T13:00:00"}
         response, _ = self.request_json("post", "/api/bookings", overlapping)
         self.assertEqual(response.status_code, 409)
 
-        containing = {**adjacent, "startTime": "2026-06-12T09:00:00", "endTime": "2026-06-12T13:00:00"}
+        containing = {**adjacent, "userId": fresh_user.id, "startTime": "2026-06-12T09:00:00", "endTime": "2026-06-12T13:00:00"}
         response, _ = self.request_json("post", "/api/bookings", containing)
         self.assertEqual(response.status_code, 409)
 
         maintenance = {
             **adjacent,
+            "userId": fresh_user.id,
             "seatNo": self.seat_a2.seat_no,
             "startTime": "2026-06-13T10:00:00",
             "endTime": "2026-06-13T12:00:00",
@@ -240,6 +258,7 @@ class StudyRoomApiRegressionTests(TestCase):
 
         missing_seat = {
             **adjacent,
+            "userId": fresh_user.id,
             "seatNo": "Z99",
             "startTime": "2026-06-13T10:00:00",
             "endTime": "2026-06-13T12:00:00",
@@ -258,6 +277,7 @@ class StudyRoomApiRegressionTests(TestCase):
 
         missing_room = {
             **adjacent,
+            "userId": fresh_user.id,
             "roomId": "missing-room",
             "startTime": "2026-06-15T10:00:00",
             "endTime": "2026-06-15T12:00:00",
@@ -298,6 +318,42 @@ class StudyRoomApiRegressionTests(TestCase):
             else:
                 self.assertEqual(body["violation"]["scoreChange"], score, index)
                 self.assertTrue(Violation.objects.filter(user=self.student, type=violation_type).exists())
+
+        booking = self.create_booking()
+        check_in_response, check_in_body = self.request_json(
+            "patch",
+            f"/api/bookings/{booking.id}/status",
+            {"status": "checked_in"},
+        )
+        self.assertEqual(check_in_response.status_code, 200)
+        self.assertTrue(check_in_body["actualCheckInAt"])
+        booking.refresh_from_db()
+        self.assertIsNotNone(booking.actual_check_in_at)
+
+        check_out_response, check_out_body = self.request_json(
+            "patch",
+            f"/api/bookings/{booking.id}/status",
+            {"status": "completed"},
+        )
+        self.assertEqual(check_out_response.status_code, 200)
+        self.assertTrue(check_out_body["actualCheckOutAt"])
+        booking.refresh_from_db()
+        self.assertIsNotNone(booking.actual_check_out_at)
+
+        response, body = self.request_json("get", f"/api/bookings/{self.student.id}")
+        self.assertEqual(response.status_code, 200)
+        completed_row = next(row for row in body["bookings"] if row["id"] == booking.id)
+        self.assertIn("studyMinutes", completed_row)
+        self.assertIn("createdAt", completed_row)
+
+        older_booking = self.create_booking(status="completed")
+        newer_booking = self.create_booking(status="canceled")
+        Booking.objects.filter(id=older_booking.id).update(created_at=datetime(2026, 6, 19, 9, 0, 0))
+        Booking.objects.filter(id=newer_booking.id).update(created_at=datetime(2026, 6, 20, 9, 0, 0))
+        response, body = self.request_json("get", f"/api/bookings/{self.student.id}")
+        self.assertEqual(response.status_code, 200)
+        ordered_ids = [row["id"] for row in body["bookings"]]
+        self.assertLess(ordered_ids.index(newer_booking.id), ordered_ids.index(older_booking.id))
 
         booking = self.create_booking()
         response, _ = self.request_json("patch", f"/api/bookings/{booking.id}/status", {"status": "unknown"})
