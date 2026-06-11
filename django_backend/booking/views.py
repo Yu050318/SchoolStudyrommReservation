@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import datetime
+from functools import wraps
 
 from django.db import transaction
 from django.db.models import Count, Max, Q
@@ -48,7 +49,25 @@ def api_response(payload, status=200):
 def read_json(request):
     if not request.body:
         return {}
-    return json.loads(request.body.decode("utf-8"))
+    try:
+        return json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidJsonBody from exc
+
+
+class InvalidJsonBody(ValueError):
+    pass
+
+
+def json_body_guard(view_func):
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        try:
+            return view_func(request, *args, **kwargs)
+        except InvalidJsonBody:
+            return api_response({"message": "请求体不是合法 JSON"}, status=400)
+
+    return wrapped
 
 
 def public_user(user):
@@ -129,6 +148,7 @@ def health(request):
 
 
 @csrf_exempt
+@json_body_guard
 def login(request):
     if request.method != "POST":
         return api_response({"message": "方法不支持"}, status=405)
@@ -143,6 +163,7 @@ def login(request):
 
 
 @csrf_exempt
+@json_body_guard
 def register(request):
     if request.method != "POST":
         return api_response({"message": "方法不支持"}, status=405)
@@ -197,13 +218,34 @@ def rooms(request):
 def room_seats(request, room_id):
     if request.method != "GET":
         return api_response({"message": "方法不支持"}, status=405)
+    start_time = parse_booking_datetime(request.GET.get("startTime"), None)
+    end_time = parse_booking_datetime(request.GET.get("endTime"), None)
     seats = Seat.objects.filter(room_id=room_id).order_by("seat_no")
+    active_bookings = Booking.objects.filter(
+        seat_id__in=[seat.id for seat in seats],
+        status__in=["pending", "checked_in"],
+    )
+    if start_time and end_time:
+        active_bookings = active_bookings.filter(start_time__lt=end_time, end_time__gt=start_time)
+    booking_status_by_seat = {booking.seat_id: booking.status for booking in active_bookings}
+
+    def seat_display_status(seat):
+        if seat.status == "maintenance":
+            return "maintenance"
+        if booking_status_by_seat.get(seat.id) == "checked_in":
+            return "used"
+        if booking_status_by_seat.get(seat.id) == "pending":
+            return "booked"
+        if seat.status in {"free", "booked"}:
+            return "free"
+        return seat.status
+
     return api_response(
         {
             "seats": [
                 {
                     "id": seat.seat_no,
-                    "status": seat.status,
+                    "status": seat_display_status(seat),
                     "positionNote": seat.position_note,
                     "config": seat.config,
                 }
@@ -214,19 +256,35 @@ def room_seats(request, room_id):
 
 
 @csrf_exempt
+@json_body_guard
 def create_booking(request):
     if request.method != "POST":
         return api_response({"message": "方法不支持"}, status=405)
     body = read_json(request)
+    required = [body.get("userId"), body.get("roomId"), body.get("seatNo"), body.get("startTime"), body.get("endTime")]
+    if not all(required):
+        return api_response({"message": "预约用户、座位和时间段不能为空"}, status=400)
+    start_time = parse_booking_datetime(body.get("startTime"), None)
+    end_time = parse_booking_datetime(body.get("endTime"), None)
+    if not start_time or not end_time or start_time >= end_time:
+        return api_response({"message": "预约时间段不正确"}, status=400)
     try:
         with transaction.atomic():
+            if not User.objects.filter(id=body.get("userId"), role="student").exists():
+                return api_response({"message": "预约用户不存在"}, status=404)
+            if not Room.objects.filter(id=body.get("roomId")).exists():
+                return api_response({"message": "自习室不存在"}, status=404)
             seat = Seat.objects.select_for_update().get(room_id=body.get("roomId"), seat_no=body.get("seatNo"))
-            if seat.status != "free":
-                return api_response({"message": "该座位当前不可预约"}, status=409)
-            start_time = parse_booking_datetime(body.get("startTime"), datetime(2026, 6, 4, 19, 0, 0))
-            end_time = parse_booking_datetime(body.get("endTime"), datetime(2026, 6, 4, 21, 0, 0))
-            seat.status = "booked"
-            seat.save(update_fields=["status"])
+            if seat.status == "maintenance":
+                return api_response({"message": "该座位正在维修，暂不可预约"}, status=409)
+            has_conflict = Booking.objects.filter(
+                seat=seat,
+                status__in=["pending", "checked_in"],
+                start_time__lt=end_time,
+                end_time__gt=start_time,
+            ).exists()
+            if has_conflict:
+                return api_response({"message": "该座位在所选时间段已被预约，请选择其他时间段"}, status=409)
             booking = Booking.objects.create(
                 user_id=body.get("userId"),
                 room_id=body.get("roomId"),
@@ -262,6 +320,7 @@ def user_bookings(request, user_id):
 
 
 @csrf_exempt
+@json_body_guard
 def booking_status(request, booking_id):
     if request.method != "PATCH":
         return api_response({"message": "方法不支持"}, status=405)
@@ -280,8 +339,6 @@ def booking_status(request, booking_id):
             violation = get_credit_violation(status, minutes_late, minutes_before)
             booking.status = status
             booking.save(update_fields=["status"])
-            booking.seat.status = "free" if status in {"completed", "canceled"} else "booked"
-            booking.seat.save(update_fields=["status"])
             if violation:
                 Violation.objects.create(
                     user=booking.user,
@@ -304,6 +361,7 @@ def user_violations(request, user_id):
 
 
 @csrf_exempt
+@json_body_guard
 def appeal_violation(request, violation_id):
     if request.method != "PATCH":
         return api_response({"message": "方法不支持"}, status=405)
@@ -385,6 +443,7 @@ def admin_users(request):
 
 
 @csrf_exempt
+@json_body_guard
 def admin_user_detail(request, user_id):
     user = User.objects.filter(id=user_id, role="student").first()
     if not user:
@@ -450,17 +509,21 @@ def admin_seats(request):
 
 
 @csrf_exempt
+@json_body_guard
 def admin_seat_status(request, seat_id):
     if request.method != "PATCH":
         return api_response({"message": "方法不支持"}, status=405)
     body = read_json(request)
     if body.get("status") not in SEAT_STATUS_CN:
         return api_response({"message": "座位状态不正确"}, status=400)
-    Seat.objects.filter(id=seat_id).update(status=body["status"])
+    updated = Seat.objects.filter(id=seat_id).update(status=body["status"])
+    if not updated:
+        return api_response({"message": "座位不存在"}, status=404)
     return api_response({"status": body["status"]})
 
 
 @csrf_exempt
+@json_body_guard
 def admin_rooms(request):
     if request.method != "POST":
         return api_response({"message": "方法不支持"}, status=405)
@@ -501,6 +564,7 @@ def admin_rooms(request):
 
 
 @csrf_exempt
+@json_body_guard
 def admin_room_detail(request, room_id):
     room = Room.objects.filter(id=room_id).first()
     if not room:
@@ -535,6 +599,7 @@ def admin_room_detail(request, room_id):
 
 
 @csrf_exempt
+@json_body_guard
 def admin_violation_status(request, violation_id):
     if request.method != "PATCH":
         return api_response({"message": "方法不支持"}, status=405)
@@ -546,7 +611,9 @@ def admin_violation_status(request, violation_id):
     status = status_by_action.get(body.get("action"), body.get("status") or "申诉已驳回")
     if status not in {"申诉已驳回", "违规已撤回", "申诉待处理"}:
         return api_response({"message": "违规处理状态不正确"}, status=400)
-    Violation.objects.filter(id=violation_id).update(status=status)
+    updated = Violation.objects.filter(id=violation_id).update(status=status)
+    if not updated:
+        return api_response({"message": "违规记录不存在"}, status=404)
     message = "管理员已撤回本次违规，相关扣分已取消" if status == "违规已撤回" else "管理员已驳回本次申诉，违规扣分维持不变"
     return api_response({"status": status, "message": message})
 
