@@ -1,10 +1,12 @@
 import json
 from datetime import datetime, timedelta
 
+from django.contrib.auth.hashers import check_password, identify_hasher
 from django.core.management import call_command
 from django.test import Client, TestCase
 
 from booking.models import Booking, Room, Seat, User, Violation
+from booking.views import make_auth_token
 
 
 class StudyRoomApiRegressionTests(TestCase):
@@ -39,6 +41,7 @@ class StudyRoomApiRegressionTests(TestCase):
             class_name="自习室管理组",
             phone="010-88880000",
         )
+        self.admin_headers = {"HTTP_AUTHORIZATION": f"Bearer {make_auth_token(self.admin)}"}
         self.room = Room.objects.create(
             id="room-a",
             name="A 区自习室",
@@ -119,6 +122,10 @@ class StudyRoomApiRegressionTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["user"]["role"], "student")
+        self.assertTrue(body["token"])
+        self.student.refresh_from_db()
+        identify_hasher(self.student.password)
+        self.assertTrue(check_password("123456", self.student.password))
 
         response, _ = self.request_json(
             "post",
@@ -141,6 +148,7 @@ class StudyRoomApiRegressionTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["user"]["role"], "admin")
+        self.assertTrue(body["token"])
 
     def test_register_success_missing_fields_and_duplicate_account(self):
         payload = {
@@ -154,6 +162,10 @@ class StudyRoomApiRegressionTests(TestCase):
         response, body = self.request_json("post", "/api/auth/register", payload)
         self.assertEqual(response.status_code, 201)
         self.assertEqual(body["user"]["role"], "student")
+        self.assertTrue(body["token"])
+        user = User.objects.get(account=payload["account"])
+        self.assertNotEqual(user.password, payload["password"])
+        self.assertTrue(check_password(payload["password"], user.password))
 
         response, _ = self.request_json("post", "/api/auth/register", {**payload, "account": "20239998", "phone": ""})
         self.assertEqual(response.status_code, 400)
@@ -291,6 +303,14 @@ class StudyRoomApiRegressionTests(TestCase):
         response, _ = self.request_json("patch", f"/api/bookings/{booking.id}/status", {"status": "unknown"})
         self.assertEqual(response.status_code, 400)
 
+        booking = self.create_booking()
+        response, _ = self.request_json("patch", f"/api/bookings/{booking.id}/status", {"status": "completed"})
+        self.assertEqual(response.status_code, 409)
+
+        canceled = self.create_booking(status="canceled")
+        response, _ = self.request_json("patch", f"/api/bookings/{canceled.id}/status", {"status": "checked_in"})
+        self.assertEqual(response.status_code, 409)
+
         response, _ = self.request_json("patch", "/api/bookings/999999/status", {"status": "checked_in"})
         self.assertEqual(response.status_code, 404)
 
@@ -332,18 +352,31 @@ class StudyRoomApiRegressionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["status"], "申诉待处理")
 
-        response, body = self.request_json("get", "/api/admin/violations")
+        response, _ = self.request_json("get", "/api/admin/violations")
+        self.assertEqual(response.status_code, 401)
+
+        response, body = self.request_json("get", "/api/admin/violations", **self.admin_headers)
         self.assertEqual(response.status_code, 200)
         self.assertIn(violation.id, [row["id"] for row in body["violations"]])
 
-        response, body = self.request_json("patch", f"/api/admin/violations/{violation.id}/status", {"action": "revoke"})
+        response, body = self.request_json(
+            "patch",
+            f"/api/admin/violations/{violation.id}/status",
+            {"action": "revoke"},
+            **self.admin_headers,
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["status"], "违规已撤回")
 
-        response, _ = self.request_json("patch", "/api/admin/violations/999999/status", {"action": "reject"})
+        response, _ = self.request_json(
+            "patch",
+            "/api/admin/violations/999999/status",
+            {"action": "reject"},
+            **self.admin_headers,
+        )
         self.assertEqual(response.status_code, 404)
 
-        response, body = self.request_json("get", "/api/admin/users")
+        response, body = self.request_json("get", "/api/admin/users", **self.admin_headers)
         self.assertEqual(response.status_code, 200)
         student_row = next(row for row in body["users"] if row["id"] == self.student.id)
         self.assertEqual(student_row["credit"], 100)
@@ -351,23 +384,43 @@ class StudyRoomApiRegressionTests(TestCase):
     def test_admin_user_room_and_seat_management(self):
         self.create_booking()
 
-        response, body = self.request_json("get", "/api/admin/stats")
+        response, _ = self.request_json("get", "/api/admin/stats")
+        self.assertEqual(response.status_code, 401)
+
+        response, body = self.request_json("get", "/api/admin/stats", **self.admin_headers)
         self.assertEqual(response.status_code, 200)
         self.assertIn("todayBookings", body)
         self.assertIn("checkRate", body)
 
-        response, body = self.request_json("get", "/api/admin/bookings")
+        response, body = self.request_json("get", "/api/admin/bookings", **self.admin_headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(body["bookings"]), 1)
+
+        booking = Booking.objects.get()
+        response, _ = self.request_json("patch", f"/api/admin/bookings/{booking.id}/status", {"status": "canceled"})
+        self.assertEqual(response.status_code, 401)
+
+        response, body = self.request_json(
+            "patch",
+            f"/api/admin/bookings/{booking.id}/status",
+            {"status": "canceled"},
+            **self.admin_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["status"], "已取消")
 
         response, _ = self.request_json(
             "patch",
             f"/api/admin/users/{self.student.id}",
             {"name": "林同学改", "college": "软件工程学院", "className": "软件工程 2301", "phone": "13811111111"},
+            **self.admin_headers,
         )
         self.assertEqual(response.status_code, 200)
 
-        response, _ = self.request_json("delete", f"/api/admin/users/{self.student.id}")
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.name, "林同学改")
+
+        response, _ = self.request_json("delete", f"/api/admin/users/{self.student.id}", **self.admin_headers)
         self.assertEqual(response.status_code, 409)
 
         room_payload = {
@@ -377,38 +430,49 @@ class StudyRoomApiRegressionTests(TestCase):
             "hours": "08:00-22:00",
             "facilities": "插座, 台灯",
         }
-        response, body = self.request_json("post", "/api/admin/rooms", room_payload)
+        response, body = self.request_json("post", "/api/admin/rooms", room_payload, **self.admin_headers)
         self.assertEqual(response.status_code, 201)
         self.assertEqual(body["room"]["seats"]["free"], 48)
         self.assertEqual(Seat.objects.filter(room_id="new-room-1").count(), 48)
 
-        response, _ = self.request_json("post", "/api/admin/rooms", {**room_payload, "id": "中文 空格 !"})
+        response, _ = self.request_json("post", "/api/admin/rooms", {**room_payload, "id": "中文 空格 !"}, **self.admin_headers)
         self.assertEqual(response.status_code, 400)
 
-        response, _ = self.request_json("post", "/api/admin/rooms", room_payload)
+        response, _ = self.request_json("post", "/api/admin/rooms", room_payload, **self.admin_headers)
         self.assertEqual(response.status_code, 409)
 
         response, body = self.request_json(
             "patch",
             "/api/admin/rooms/new-room-1",
             {"name": "新增自习室改", "location": "图书馆四楼", "hours": "08:30-22:30", "facilities": ["白板"]},
+            **self.admin_headers,
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["room"]["facilities"], ["白板"])
 
-        response, _ = self.request_json("delete", f"/api/admin/rooms/{self.room.id}")
+        response, _ = self.request_json("delete", f"/api/admin/rooms/{self.room.id}", **self.admin_headers)
         self.assertEqual(response.status_code, 409)
 
-        response, body = self.request_json("patch", f"/api/admin/seats/{self.seat_a1.id}/status", {"status": "maintenance"})
+        response, body = self.request_json(
+            "patch",
+            f"/api/admin/seats/{self.seat_a1.id}/status",
+            {"status": "maintenance"},
+            **self.admin_headers,
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["status"], "maintenance")
         self.seat_a1.refresh_from_db()
         self.assertEqual(self.seat_a1.status, "maintenance")
 
-        response, _ = self.request_json("patch", f"/api/admin/seats/{self.seat_a1.id}/status", {"status": "broken"})
+        response, _ = self.request_json(
+            "patch",
+            f"/api/admin/seats/{self.seat_a1.id}/status",
+            {"status": "broken"},
+            **self.admin_headers,
+        )
         self.assertEqual(response.status_code, 400)
 
-        response, _ = self.request_json("patch", "/api/admin/seats/999999/status", {"status": "free"})
+        response, _ = self.request_json("patch", "/api/admin/seats/999999/status", {"status": "free"}, **self.admin_headers)
         self.assertEqual(response.status_code, 404)
 
     def test_seed_demo_command_creates_representative_data(self):
@@ -419,6 +483,9 @@ class StudyRoomApiRegressionTests(TestCase):
 
         self.assertEqual(User.objects.filter(role="student").count(), 3)
         self.assertEqual(User.objects.filter(role="admin").count(), 2)
+        demo_user = User.objects.get(account="20230218")
+        self.assertNotEqual(demo_user.password, "123456")
+        self.assertTrue(check_password("123456", demo_user.password))
         self.assertGreaterEqual(Room.objects.count(), 2)
         self.assertEqual(Seat.objects.count(), Room.objects.count() * 48)
         self.assertTrue(Booking.objects.filter(status="pending").exists())

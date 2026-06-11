@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from django.contrib.auth.hashers import make_password
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
@@ -127,7 +128,7 @@ class Command(BaseCommand):
             [
                 User(
                     account=account,
-                    password=password,
+                    password=make_password(password),
                     name=name,
                     role=role,
                     college=college,

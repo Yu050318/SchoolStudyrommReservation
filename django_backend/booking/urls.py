@@ -16,7 +16,7 @@ urlpatterns = [
     path("violations/<int:violation_id>/appeal", views.appeal_violation),
     path("admin/stats", views.admin_stats),
     path("admin/bookings", views.admin_bookings),
-    path("admin/bookings/<int:booking_id>/status", views.booking_status),
+    path("admin/bookings/<int:booking_id>/status", views.admin_booking_status),
     path("admin/users", views.admin_users),
     path("admin/users/<int:user_id>", views.admin_user_detail),
     path("admin/violations", views.admin_violations),

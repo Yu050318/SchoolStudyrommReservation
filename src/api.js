@@ -1,9 +1,24 @@
 const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+export const AUTH_TOKEN_KEY = 'study-room-auth-token'
+
+export function setAuthToken(token) {
+  if (token) {
+    window.localStorage.setItem(AUTH_TOKEN_KEY, token)
+  } else {
+    window.localStorage.removeItem(AUTH_TOKEN_KEY)
+  }
+}
+
+export function getAuthToken() {
+  return window.localStorage.getItem(AUTH_TOKEN_KEY) || ''
+}
 
 export async function apiRequest(path, options = {}) {
+  const token = getAuthToken()
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {}),
     },
     ...options,
@@ -16,6 +31,10 @@ export async function apiRequest(path, options = {}) {
     const error = new Error(payload.message || '请求服务器失败')
     error.status = response.status
     throw error
+  }
+
+  if (payload.token) {
+    setAuthToken(payload.token)
   }
 
   return payload

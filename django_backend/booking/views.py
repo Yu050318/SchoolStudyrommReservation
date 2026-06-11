@@ -3,10 +3,14 @@ import re
 from datetime import datetime
 from functools import wraps
 
+from django.contrib.auth.hashers import check_password, identify_hasher, make_password
+from django.core import signing
+from django.core.signing import BadSignature, SignatureExpired
 from django.db import transaction
 from django.db.models import Count, Max, Q
 from django.http import JsonResponse
 from django.utils.dateparse import parse_datetime
+from django.utils.crypto import constant_time_compare
 from django.views.decorators.csrf import csrf_exempt
 
 from .models import Booking, Room, Seat, User, Violation
@@ -35,6 +39,14 @@ VIOLATION_SCORE_BY_TYPE = {
     "迟到签到": -5,
     "临近取消": -3,
     "轻微迟到": -2,
+}
+AUTH_SIGNER = signing.TimestampSigner(salt="booking-admin-api")
+AUTH_TOKEN_MAX_AGE = 60 * 60 * 12
+STATUS_TRANSITIONS = {
+    "pending": {"checked_in", "canceled"},
+    "checked_in": {"completed"},
+    "completed": set(),
+    "canceled": set(),
 }
 
 
@@ -66,6 +78,55 @@ def json_body_guard(view_func):
             return view_func(request, *args, **kwargs)
         except InvalidJsonBody:
             return api_response({"message": "请求体不是合法 JSON"}, status=400)
+
+    return wrapped
+
+
+def is_hashed_password(value):
+    try:
+        identify_hasher(value)
+    except ValueError:
+        return False
+    return True
+
+
+def password_matches(user, raw_password):
+    if is_hashed_password(user.password):
+        return check_password(raw_password, user.password)
+    return constant_time_compare(str(user.password), str(raw_password))
+
+
+def upgrade_password_if_needed(user, raw_password):
+    if not is_hashed_password(user.password):
+        user.password = make_password(raw_password)
+        user.save(update_fields=["password"])
+
+
+def make_auth_token(user):
+    return AUTH_SIGNER.sign(f"{user.id}:{user.role}")
+
+
+def read_auth_user(request):
+    header = request.META.get("HTTP_AUTHORIZATION", "")
+    if not header.startswith("Bearer "):
+        return None
+    token = header.removeprefix("Bearer ").strip()
+    try:
+        value = AUTH_SIGNER.unsign(token, max_age=AUTH_TOKEN_MAX_AGE)
+        user_id, role = value.split(":", 1)
+    except (BadSignature, SignatureExpired, ValueError):
+        return None
+    return User.objects.filter(id=user_id, role=role).first()
+
+
+def require_admin(view_func):
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        user = read_auth_user(request)
+        if not user or user.role != "admin":
+            return api_response({"message": "需要管理员登录后操作"}, status=401)
+        request.auth_user = user
+        return view_func(request, *args, **kwargs)
 
     return wrapped
 
@@ -153,13 +214,14 @@ def login(request):
     if request.method != "POST":
         return api_response({"message": "方法不支持"}, status=405)
     body = read_json(request)
-    query = User.objects.filter(account=body.get("account"), password=body.get("password"))
+    query = User.objects.filter(account=body.get("account"))
     if body.get("role"):
         query = query.filter(role=body.get("role"))
     user = query.first()
-    if not user:
+    if not user or not password_matches(user, body.get("password") or ""):
         return api_response({"message": "账号、密码或身份不正确"}, status=401)
-    return api_response({"user": public_user(user)})
+    upgrade_password_if_needed(user, body.get("password") or "")
+    return api_response({"user": public_user(user), "token": make_auth_token(user)})
 
 
 @csrf_exempt
@@ -176,14 +238,14 @@ def register(request):
         return api_response({"message": "该学号已注册，请直接登录"}, status=409)
     user = User.objects.create(
         account=body["account"],
-        password=body["password"],
+        password=make_password(body["password"]),
         name=body["name"],
         role="student",
         college=body["college"],
         class_name=body["className"],
         phone=email,
     )
-    return api_response({"user": public_user(user)}, status=201)
+    return api_response({"user": public_user(user), "token": make_auth_token(user)}, status=201)
 
 
 def rooms(request):
@@ -322,6 +384,17 @@ def user_bookings(request, user_id):
 @csrf_exempt
 @json_body_guard
 def booking_status(request, booking_id):
+    return booking_status_core(request, booking_id)
+
+
+@csrf_exempt
+@json_body_guard
+@require_admin
+def admin_booking_status(request, booking_id):
+    return booking_status_core(request, booking_id)
+
+
+def booking_status_core(request, booking_id):
     if request.method != "PATCH":
         return api_response({"message": "方法不支持"}, status=405)
     body = read_json(request)
@@ -333,6 +406,12 @@ def booking_status(request, booking_id):
     try:
         with transaction.atomic():
             booking = Booking.objects.select_for_update().select_related("seat").get(id=booking_id)
+            if status == booking.status:
+                return api_response({"status": BOOKING_STATUS_CN.get(status, status), "violation": None})
+            if status not in STATUS_TRANSITIONS.get(booking.status, set()):
+                current_status = BOOKING_STATUS_CN.get(booking.status, booking.status)
+                next_status = BOOKING_STATUS_CN.get(status, status)
+                return api_response({"message": f"预约不能从{current_status}直接更新为{next_status}"}, status=409)
             now = datetime.now()
             minutes_late = int((now - booking.start_time).total_seconds() // 60)
             minutes_before = int((booking.start_time - now).total_seconds() // 60)
@@ -383,6 +462,7 @@ def appeal_violation(request, violation_id):
     return api_response({"status": "申诉待处理", "message": "申诉已提交，请等待管理员审核"})
 
 
+@require_admin
 def admin_stats(request):
     today = datetime.now().date()
     total_bookings = Booking.objects.count()
@@ -398,6 +478,7 @@ def admin_stats(request):
     )
 
 
+@require_admin
 def admin_bookings(request):
     rows = Booking.objects.select_related("user", "room", "seat").order_by("-created_at", "-start_time")
     return api_response(
@@ -420,6 +501,7 @@ def admin_bookings(request):
     )
 
 
+@require_admin
 def admin_users(request):
     users = User.objects.filter(role="student").annotate(bookings_count=Count("bookings")).order_by("-id")
     payload = []
@@ -444,6 +526,7 @@ def admin_users(request):
 
 @csrf_exempt
 @json_body_guard
+@require_admin
 def admin_user_detail(request, user_id):
     user = User.objects.filter(id=user_id, role="student").first()
     if not user:
@@ -457,7 +540,7 @@ def admin_user_detail(request, user_id):
         user.class_name = body["className"]
         user.phone = body["phone"]
         if body.get("password"):
-            user.password = body["password"]
+            user.password = make_password(body["password"])
         user.save()
         return api_response({"user": public_user(user)})
     if request.method == "DELETE":
@@ -469,6 +552,7 @@ def admin_user_detail(request, user_id):
     return api_response({"message": "方法不支持"}, status=405)
 
 
+@require_admin
 def admin_violations(request):
     rows = Violation.objects.select_related("user").filter(status="申诉待处理")
     return api_response(
@@ -485,6 +569,7 @@ def admin_violations(request):
     )
 
 
+@require_admin
 def admin_seats(request):
     room_id = request.GET.get("roomId")
     seats = Seat.objects.select_related("room")
@@ -510,6 +595,7 @@ def admin_seats(request):
 
 @csrf_exempt
 @json_body_guard
+@require_admin
 def admin_seat_status(request, seat_id):
     if request.method != "PATCH":
         return api_response({"message": "方法不支持"}, status=405)
@@ -524,6 +610,7 @@ def admin_seat_status(request, seat_id):
 
 @csrf_exempt
 @json_body_guard
+@require_admin
 def admin_rooms(request):
     if request.method != "POST":
         return api_response({"message": "方法不支持"}, status=405)
@@ -565,6 +652,7 @@ def admin_rooms(request):
 
 @csrf_exempt
 @json_body_guard
+@require_admin
 def admin_room_detail(request, room_id):
     room = Room.objects.filter(id=room_id).first()
     if not room:
@@ -600,6 +688,7 @@ def admin_room_detail(request, room_id):
 
 @csrf_exempt
 @json_body_guard
+@require_admin
 def admin_violation_status(request, violation_id):
     if request.method != "PATCH":
         return api_response({"message": "方法不支持"}, status=405)
